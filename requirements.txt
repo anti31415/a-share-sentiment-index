@@ -1,0 +1,9 @@
+# Core pipeline (fetch.py, series.py, compute.py, history.py, backtest.py,
+# actionable.py, check_signal.py, run_daily.py, ...): standard library only,
+# no dependencies.
+
+# Needed ONLY by margin.py (fetch_and_save) and asi/fetch_erp_data.py, which
+# both call out to akshare for data East Money / legulegu don't otherwise
+# expose in a form the rest of the project can hit directly:
+akshare>=1.18
+py_mini_racer

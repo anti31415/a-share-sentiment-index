@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+asi/data/cache/
+asi/data/tranche_state.json
+.claude/settings.local.json
+
+# Chinese-language session artifacts and working documents -- kept locally
+# for reference but not part of the English GitHub repo
+local-notes/
+cjk_scan_out.txt

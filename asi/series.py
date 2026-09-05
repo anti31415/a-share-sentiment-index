@@ -95,10 +95,18 @@ def _eff_bps_index(bps):
     return avail, vals
 
 
-def cross_section(sample, index_dates):
+def cross_section(sample, index_dates, with_bps=True):
     """
     Computes three cross-sectional readings per day across the sampled stocks.
     Returns {date: {"breadth":%, "new_low":%, "broken_net_rate":%, "n": stocks trading in the sample}}
+
+    with_bps=False skips the per-stock annual-report BPS fetch (one request per
+    sampled stock, i.e. roughly half of a cold run's total network work) and
+    returns broken_net_rate=None for every date. Callers that read the
+    below-book-value rate from the full-market listing instead of from the
+    sample -- run_daily.today_values() does -- never look at that key, so
+    fetching it is pure cost for them. build_panel(), which writes the
+    historical below-book-value column into asi_history.csv, still needs it.
     """
     idx_set = set(index_dates)
     up = {d: 0 for d in index_dates}
@@ -112,8 +120,11 @@ def cross_section(sample, index_dates):
         k = fetch.stock_daily(fetch.sina_symbol(code, mkt))
         if not k or len(k) < 30:
             continue
-        bps = fetch.stock_bps(code, mkt)
-        avail, bvals = _eff_bps_index(bps) if bps else ([], [])
+        if with_bps:
+            bps = fetch.stock_bps(code, mkt)
+            avail, bvals = _eff_bps_index(bps) if bps else ([], [])
+        else:
+            avail, bvals = [], []
 
         win = deque()                                  # rolling 252-day low
         prev = None

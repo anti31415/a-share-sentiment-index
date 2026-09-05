@@ -22,10 +22,25 @@ from compute import compute, InsufficientData
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def today_values(n_sample=900):
+def today_values(n_sample=900, workers=32, recent_n=15, with_bps=False):
     """Fetches every indicator's raw value for the latest trading day. The
     below-book-value rate is [measured across the full market] -- no
-    sampling, no hardcoded common-sense constant."""
+    sampling, no hardcoded common-sense constant.
+
+    The sampled stocks' daily bars are prefetched concurrently (see the
+    prewarm below); everything downstream then reads them straight out of the
+    disk cache, so the numbers produced are identical to a serial run.
+
+    Returns (date, today's values, today's index-panel row, (n_below, n_all),
+    recent_panel). Every cross-sectional reading below is already computed for
+    the whole `recent_n`-day window rather than for today alone, so
+    `recent_panel` -- [{date, ...the same input keys}, ...], oldest first --
+    costs no extra network. check_signal.py uses it to rebuild the recent ASI
+    series without depending on when asi_history.csv was last committed.
+    Reconstructing a *past* day's below-book-value rate does need the sampled
+    stocks' annual-report BPS, so pass with_bps=True when the caller intends
+    to score days other than today.
+    """
     idx = fetch.index_daily()
     ip_all = series.index_panel(idx)
     ip = ip_all[-1]
@@ -37,8 +52,24 @@ def today_values(n_sample=900):
 
     # Breadth / new-low still need a cross-section, reconstructed from a sample
     sample = fetch.sample_universe(n_sample)
-    recent_dates = [r["date"] for r in ip_all[-15:]]   # small recent window, cheap to recompute daily
-    cs = series.cross_section(sample, recent_dates)
+    recent_dates = [r["date"] for r in ip_all[-recent_n:]]  # small recent window, cheap to recompute daily
+
+    # Prewarm the per-stock daily-bar cache concurrently. cross_section() and
+    # the limit-board reconstruction below both walk the sample one stock at a
+    # time; on a cold cache (every scheduled run starts from a fresh clone)
+    # that was ~900 serial HTTP round trips. Measured: ~1.5s/request serially
+    # vs. ~0.16s/request at 32 workers, and the source shows no rate-limiting
+    # at that concurrency. Cached JSON is byte-identical either way.
+    fetch.bulk(lambda x: fetch.stock_daily(fetch.sina_symbol(x[0], x[1])),
+               sample, workers=workers)
+    if with_bps:
+        fetch.bulk(lambda x: fetch.stock_bps(x[0], x[1]), sample, workers=workers)
+
+    # with_bps defaults to False: today's own below-book-value rate comes from
+    # `bn` above (measured across the full market), so the per-stock BPS fetch
+    # -- about half of a cold run's network work -- is dead weight unless past
+    # days are being scored too.
+    cs = series.cross_section(sample, recent_dates, with_bps=with_bps)
     d = ip["date"]
     br = [cs[x]["breadth_raw"] for x in sorted(cs) if cs[x]["breadth_raw"] is not None][-5:]
 
@@ -54,11 +85,37 @@ def today_values(n_sample=900):
         if k:
             kline_by_code[code] = k
     lb = limitboard.cross_section(sample, recent_dates, kline_by_code)
-    erp_today = erp_mod.daily_series(recent_dates).get(d)
+    erp_by_date = erp_mod.daily_series(recent_dates)
+
+    # Same assembly as series.build_panel() + history.build(), restricted to
+    # the recent window: breadth is the 5-day mean of the raw reading, and the
+    # below-book-value rate is the sample-based reconstruction (the column
+    # asi_history.csv stores), not today's full-market snapshot -- so a day
+    # scored from here is comparable with the committed history.
+    br_sm = series.smooth([cs[x]["breadth_raw"] for x in recent_dates], 5)
+    recent_panel = []
+    for i, x in enumerate(recent_dates):
+        rec = ip_all[-recent_n:][i]
+        recent_panel.append({
+            "date": x,
+            "close": rec["close"],
+            "broken_net_rate": cs[x]["broken_net_rate"],
+            "erp": erp_by_date.get(x),
+            "breadth": br_sm[i],
+            "new_low": cs[x]["new_low"],
+            "vol_temp": rec.get("vol_temp"),
+            "rsi14": rec.get("rsi14"),
+            "bias60": rec.get("bias60"),
+            "drawdown": rec.get("drawdown"),
+            "margin_chg5": margin_by_date.get(x),
+            "limit_up_rate": lb[x]["up_rate"],
+            "limit_down_rate": lb[x]["down_rate"],
+            "max_consec_limit": lb[x]["max_consec"] if lb[x]["up_rate"] is not None else None,
+        })
 
     return d, {
         "broken_net_rate": round(bn, 2),
-        "erp": erp_today,
+        "erp": erp_by_date.get(d),
         "breadth": round(sum(br) / len(br), 2) if br else None,
         "new_low": round(cs[d]["new_low"], 2) if cs[d]["new_low"] is not None else None,
         "vol_temp": ip.get("vol_temp"),
@@ -69,7 +126,7 @@ def today_values(n_sample=900):
         "limit_up_rate": lb[d]["up_rate"],
         "limit_down_rate": lb[d]["down_rate"],
         "max_consec_limit": lb[d]["max_consec"] if lb[d]["up_rate"] is not None else None,
-    }, ip, (n_bn, n_all)
+    }, ip, (n_bn, n_all), recent_panel
 
 
 def render(date, res, meta):
@@ -104,7 +161,7 @@ def render(date, res, meta):
 
 
 def main():
-    date, vals, ip, bn = today_values()
+    date, vals, ip, bn, _panel = today_values()
     try:
         res = compute(vals)
     except InsufficientData as e:

@@ -149,7 +149,7 @@ def bulk(fn, items, workers=8, label=""):
         except Exception:                            # noqa: BLE001
             r = None
         done[0] += 1
-        if done[0] % 50 == 0:
+        if label and done[0] % 50 == 0:
             print("      %s %d/%d" % (label, done[0], len(items)), flush=True)
         return r
     with ThreadPoolExecutor(max_workers=workers) as ex:

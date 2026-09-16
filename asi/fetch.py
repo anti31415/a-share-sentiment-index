@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-Data-fetching layer. Three sources, all free public endpoints, all disk-cached:
+Data-fetching layer. All free public endpoints, all disk-cached:
 
   * Sina CN_MarketData.getKLineData -- daily bars, [unadjusted], back to 2001.
+      Tencent kline and East Money push2his (fqt=0) serve the same unadjusted
+      closes and are the failovers; the daily check rotates across all three.
       Unadjusted matters: only raw prices can be compared directly against
       annual-report book value per share to compute PB.
   * East Money datacenter-web RPT_F10_..  -- per-stock annual-report BPS.
-  * East Money push2 clist                -- full A-share market listing +
+  * Sina hs_a node / East Money push2 clist (failover) -- full A-share market listing +
       current PB, giving a [measured] below-book-value denominator that
       replaces v1's hardcoded TOTAL_A_SHARES = 5400.
 """
@@ -24,26 +26,93 @@ SINA = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
 
 
 # ---------------------------------------------------------------- index / stock daily bars
-def _sina_kline(sym):
-    s = fetch(SINA % sym)
-    try:
-        rows = json.loads(s)
-    except Exception:                                # noqa: BLE001
-        return []
+TENCENT = "https://web.ifzq.gtimg.cn/appstock/app/kline/kline?param=%s,day,,,%d"
+TENCENT_MAX = 2000        # longer requests come back with an empty payload
+EASTMONEY = ("https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=%s"
+             "&fields1=f1&fields2=f51,f53,f56&klt=101&fqt=0&lmt=%d&end=20500101")
+
+
+class NoData(RuntimeError):
+    """Every source came back empty or failed. Raised rather than returning []
+    so cached_json() never persists an empty result as if it were real."""
+
+
+def _sina_kline(sym, n=6000):
+    s = fetch(SINA.replace("datalen=6000", "datalen=%d" % n) % sym, retries=2)
+    rows = json.loads(s)
     if not isinstance(rows, list):
         return []
     return [[r["day"], float(r["close"]), float(r["volume"])] for r in rows
             if r.get("close") and float(r["close"]) > 0]
 
 
+def _tencent_kline(sym, n=TENCENT_MAX):
+    """Tencent unadjusted daily bars. Row = [date, open, close, high, low,
+    volume-in-lots]; volume x100 -> shares, matching Sina's units."""
+    s = fetch(TENCENT % (sym, min(n, TENCENT_MAX)), retries=2)
+    d = (json.loads(s).get("data") or {})
+    d = d.get(sym) if isinstance(d, dict) else None
+    rows = (d or {}).get("day") or []
+    return [[r[0], float(r[2]), float(r[5]) * 100.0] for r in rows
+            if len(r) >= 6 and float(r[2]) > 0]
+
+
+def _eastmoney_kline(sym, n=6000):
+    """East Money unadjusted (fqt=0) daily bars: "date,close,volume-in-lots"."""
+    secid = ("1." if sym[:2] == "sh" else "0.") + sym[2:]
+    s = fetch(EASTMONEY % (secid, n), retries=2)
+    rows = ((json.loads(s).get("data") or {}).get("klines")) or []
+    out = []
+    for line in rows:
+        d, c, v = line.split(",")[:3]
+        if float(c) > 0:
+            out.append([d, float(c), float(v) * 100.0])
+    return out
+
+
+SOURCES = [_sina_kline, _eastmoney_kline, _tencent_kline]   # full-history sources first
+
+
+def _kline(sym, n, rotate=False):
+    """Daily bars with source failover (all three serve identical unadjusted
+    closes). Every one of these free endpoints blocks a burst of concurrent
+    requests from one IP -- Sina with HTTP 456, Tencent with 501 -- and a
+    blocked source used to crash the daily check. With rotate=True the first
+    source is picked per symbol, so a 900-stock burst is split ~300/300/300
+    instead of landing on one host."""
+    order = list(SOURCES)
+    if rotate:
+        k = sum(map(ord, sym)) % len(order)
+        order = order[k:] + order[:k]
+    errs = []
+    for src in order:
+        try:
+            rows = src(sym, n)
+        except Exception as e:                       # noqa: BLE001
+            errs.append("%s: %r" % (src.__name__, e))
+            continue
+        if rows:
+            return rows[-n:]
+        errs.append("%s: empty" % src.__name__)
+    raise NoData("no daily bars for %s (%s)" % (sym, "; ".join(errs)))
+
+
 def index_daily(sym="sh000001"):
     """[[date, close, volume], ...] in chronological order."""
-    return cached_json("idx_" + sym, lambda: _sina_kline(sym))
+    return cached_json("idx_" + sym, lambda: _kline(sym, 6000))
 
 
 def stock_daily(sym):
     """Per-stock [unadjusted] [[date, close, volume], ...]."""
-    return cached_json("k_" + sym, lambda: _sina_kline(sym))
+    return cached_json("k_" + sym, lambda: _kline(sym, 6000))
+
+
+def stock_recent(sym, n=400):
+    """Last `n` unadjusted bars only -- enough for the daily check (252-day
+    new-low window + a 90-day re-score window). The first source rotates, which spreads the
+    ~900-request burst across all three sources (see _kline). Separate cache
+    key so a short series never shadows stock_daily()."""
+    return cached_json("kr%d_%s" % (n, sym), lambda: _kline(sym, n, rotate=True))
 
 
 # ---------------------------------------------------------------- full market listing
@@ -51,7 +120,7 @@ def universe():
     """[[code, mkt, name, pb], ...] -- full A-share listing (Sina hs_a node).
     Both the numerator and denominator of the below-book-value rate are now
     [measured], replacing v1's hardcoded TOTAL_A_SHARES = 5400."""
-    def go():
+    def sina():
         base = ("https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
                 "Market_Center.getHQNodeData?page=%d&num=100&sort=symbol&asc=1&node=hs_a")
         rows, pn = [], 1
@@ -74,6 +143,51 @@ def universe():
             if pn > 80:
                 break
         return rows
+
+    def eastmoney():
+        # f12 code, f13 market (1=SH, 0=SZ), f14 name, f23 PB(MRQ). Same
+        # Shanghai+Shenzhen A-share scope as Sina's hs_a node.
+        base = ("https://%s.eastmoney.com/api/qt/clist/get?pn=%d&pz=100&po=0&np=1"
+                "&fltt=2&invt=2&fid=f12&fs=m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
+                "&fields=f12,f13,f14,f23")
+        hosts = ["82.push2", "push2", "push2delay"]  # the bare push2 host often 502s
+
+        def page_of(pn):
+            for h in list(hosts):
+                try:
+                    return json.loads(fetch(base % (h, pn), retries=2)).get("data") or {}
+                except Exception:                    # noqa: BLE001
+                    hosts.remove(h)
+                    hosts.append(h)                  # demote a failing host
+            raise NoData("East Money clist page %d failed on every host" % pn)
+
+        rows, pn = [], 1
+        while pn <= 80:
+            data = page_of(pn)
+            page = data.get("diff") or []
+            if not page:
+                break
+            for x in page:
+                pb = x.get("f23")
+                rows.append([x["f12"], 1 if x["f13"] == 1 else 0, x["f14"],
+                             float(pb) if isinstance(pb, (int, float)) and pb != 0 else None])
+            if len(rows) >= data.get("total", 0):
+                break
+            pn += 1
+            time.sleep(0.1)
+        return rows
+
+    def go():
+        # A full listing is ~5,500 names; a short one means paging broke off
+        # part-way (block / timeout) and must not become the denominator.
+        for src in (sina, eastmoney):
+            try:
+                rows = src()
+            except Exception:                        # noqa: BLE001
+                continue
+            if len(rows) >= 4000:
+                return rows
+        raise NoData("full A-share listing unavailable from Sina and East Money")
     return cached_json("universe", go)
 
 
@@ -105,7 +219,7 @@ def stock_bps(code, mkt):
              "source": "HSF10", "client": "PC"}
         s = fetch("https://datacenter-web.eastmoney.com/api/data/v1/get?"
                   + urllib.parse.urlencode(q), retries=4)
-        res = json.loads(s).get("result")
+        res = json.loads(s).get("result")        # a failure raises, so it isn't cached as "no BPS"
         if not res or not res.get("data"):
             return []
         return [[r["REPORT_DATE"][:10], float(r["BPS"])]

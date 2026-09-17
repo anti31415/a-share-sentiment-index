@@ -135,6 +135,8 @@ def main():
         "triggered": triggered,
         "history_through": through,
         "recomputed_days": len(seq) - len(committed) - 1,
+        "sample_loaded": "%d/%d" % (run_daily.LAST_RUN.get("sample_loaded", 0),
+                                    run_daily.LAST_RUN.get("sample_n", 0)),
     }
 
     if triggered:

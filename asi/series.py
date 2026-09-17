@@ -95,7 +95,7 @@ def _eff_bps_index(bps):
     return avail, vals
 
 
-def cross_section(sample, index_dates, with_bps=True):
+def cross_section(sample, index_dates, with_bps=True, kline_by_code=None):
     """
     Computes three cross-sectional readings per day across the sampled stocks.
     Returns {date: {"breadth":%, "new_low":%, "broken_net_rate":%, "n": stocks trading in the sample}}
@@ -107,6 +107,12 @@ def cross_section(sample, index_dates, with_bps=True):
     sample -- run_daily.today_values() does -- never look at that key, so
     fetching it is pure cost for them. build_panel(), which writes the
     historical below-book-value column into asi_history.csv, still needs it.
+
+    kline_by_code={code: bars} reads bars already fetched by the caller instead
+    of fetching them here; a code missing from it is skipped, not re-fetched.
+    Either way a stock whose bars or BPS can't be fetched is dropped from the
+    cross-section (the >=50-stock thresholds below still apply) rather than
+    aborting the whole run.
     """
     idx_set = set(index_dates)
     up = {d: 0 for d in index_dates}
@@ -117,11 +123,20 @@ def cross_section(sample, index_dates, with_bps=True):
     below_tot = {d: 0 for d in index_dates}
 
     for code, mkt, name, _pb in sample:
-        k = fetch.stock_daily(fetch.sina_symbol(code, mkt))
+        if kline_by_code is not None:
+            k = kline_by_code.get(code)
+        else:
+            try:
+                k = fetch.stock_daily(fetch.sina_symbol(code, mkt))
+            except Exception:                        # noqa: BLE001
+                k = None
         if not k or len(k) < 30:
             continue
         if with_bps:
-            bps = fetch.stock_bps(code, mkt)
+            try:
+                bps = fetch.stock_bps(code, mkt)
+            except Exception:                        # noqa: BLE001
+                bps = None
             avail, bvals = _eff_bps_index(bps) if bps else ([], [])
         else:
             avail, bvals = [], []

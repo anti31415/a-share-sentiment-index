@@ -21,8 +21,12 @@ from compute import compute, InsufficientData
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Filled by today_values(): how much of the stock sample actually loaded, so
+# check_signal.py can report a thin cross-section instead of hiding it.
+LAST_RUN = {}
 
-def today_values(n_sample=900, workers=32, recent_n=15, with_bps=False):
+
+def today_values(n_sample=900, workers=12, recent_n=15, with_bps=False):
     """Fetches every indicator's raw value for the latest trading day. The
     below-book-value rate is [measured across the full market] -- no
     sampling, no hardcoded common-sense constant.
@@ -46,7 +50,10 @@ def today_values(n_sample=900, workers=32, recent_n=15, with_bps=False):
     ip = ip_all[-1]
 
     u = fetch.universe()
-    n_all = len(u)
+    # Denominator = names with a PB reading. Sina's listing has one for every
+    # name; East Money's (the failover) leaves some blank, and counting those
+    # as "not below book" would bias the rate down.
+    n_all = sum(1 for r in u if r[3] is not None)
     n_bn = sum(1 for r in u if r[3] is not None and (r[3] <= 0 or r[3] < 1.0))
     bn = n_bn / n_all * 100.0
 
@@ -54,14 +61,17 @@ def today_values(n_sample=900, workers=32, recent_n=15, with_bps=False):
     sample = fetch.sample_universe(n_sample)
     recent_dates = [r["date"] for r in ip_all[-recent_n:]]  # small recent window, cheap to recompute daily
 
-    # Prewarm the per-stock daily-bar cache concurrently. cross_section() and
-    # the limit-board reconstruction below both walk the sample one stock at a
-    # time; on a cold cache (every scheduled run starts from a fresh clone)
-    # that was ~900 serial HTTP round trips. Measured: ~1.5s/request serially
-    # vs. ~0.16s/request at 32 workers, and the source shows no rate-limiting
-    # at that concurrency. Cached JSON is byte-identical either way.
-    fetch.bulk(lambda x: fetch.stock_daily(fetch.sina_symbol(x[0], x[1])),
-               sample, workers=workers)
+    # Fetch the sampled stocks' bars concurrently, once. Only the last ~400
+    # bars are needed (252-day new-low window + up to a 90-day re-score
+    # window), and fetch.stock_recent() goes to Tencent first with Sina as
+    # failover: 900 full-history requests at 32 workers against Sina alone
+    # drew HTTP 456 blocks on 2026-09-11 and 09-15 and crashed the run. A
+    # stock that still fails on both sources is simply left out of the
+    # cross-section below (bulk() returns None for it).
+    bars = fetch.bulk(lambda x: fetch.stock_recent(fetch.sina_symbol(x[0], x[1])),
+                      sample, workers=workers)
+    kline_by_code = {row[0]: k for row, k in zip(sample, bars) if k}
+    LAST_RUN.update(sample_n=len(sample), sample_loaded=len(kline_by_code))
     if with_bps:
         fetch.bulk(lambda x: fetch.stock_bps(x[0], x[1]), sample, workers=workers)
 
@@ -69,7 +79,8 @@ def today_values(n_sample=900, workers=32, recent_n=15, with_bps=False):
     # `bn` above (measured across the full market), so the per-stock BPS fetch
     # -- about half of a cold run's network work -- is dead weight unless past
     # days are being scored too.
-    cs = series.cross_section(sample, recent_dates, with_bps=with_bps)
+    cs = series.cross_section(sample, recent_dates, with_bps=with_bps,
+                              kline_by_code=kline_by_code)
     d = ip["date"]
     br = [cs[x]["breadth_raw"] for x in sorted(cs) if cs[x]["breadth_raw"] is not None][-5:]
 
@@ -79,11 +90,6 @@ def today_values(n_sample=900, workers=32, recent_n=15, with_bps=False):
     # original 4-dimension model instead of the full 6-dimension one used in
     # the backtest.
     margin_by_date = margin.chg5_series(recent_dates)
-    kline_by_code = {}
-    for code, mkt, name, _pb in sample:
-        k = fetch.stock_daily(fetch.sina_symbol(code, mkt))
-        if k:
-            kline_by_code[code] = k
     lb = limitboard.cross_section(sample, recent_dates, kline_by_code)
     erp_by_date = erp_mod.daily_series(recent_dates)
 

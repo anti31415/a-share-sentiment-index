@@ -8,6 +8,7 @@ os.makedirs(CACHE, exist_ok=True)
 
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 STATS = {"http": 0, "retry": 0, "cache": 0, "fail": 0}
+BLOCKED = (403, 429, 456, 501)
 
 
 def fetch(url, retries=6, timeout=30, data=None, headers=None):
@@ -30,10 +31,37 @@ def fetch(url, retries=6, timeout=30, data=None, headers=None):
             return raw.decode("utf-8", "ignore")
         except Exception as e:                       # noqa: BLE001
             last = e
+            # An anti-scraping block (Sina 456, Tencent 501, 403/429) doesn't
+            # clear in a few seconds; retrying only deepens it. Give up at once
+            # so the caller can fail over to another source.
+            if getattr(e, "code", None) in BLOCKED:
+                break
             STATS["retry"] += 1
             time.sleep(min(0.3 * (i + 1), 3.0) * (0.5 + random.random()))
     STATS["fail"] += 1
     raise RuntimeError("fetch failed %s: %r" % (url[:100], last))
+
+
+def em_datacenter(report, columns, date_col, since, page_size=500):
+    """East Money datacenter-web rows with `date_col` > since, oldest first,
+    as [(YYYY-MM-DD, row), ...]. Raises on network/parse failure."""
+    import urllib.parse
+    q = {"reportName": report, "columns": columns,
+         "filter": "(%s>'%s')" % (date_col, since),
+         "pageNumber": "1", "pageSize": str(page_size),
+         "sortColumns": date_col, "sortTypes": "1",
+         "source": "WEB", "client": "WEB"}
+    s = fetch("https://datacenter-web.eastmoney.com/api/data/v1/get?"
+              + urllib.parse.urlencode(q), retries=4)
+    res = json.loads(s).get("result") or {}
+    return [(r[date_col][:10], r) for r in (res.get("data") or [])]
+
+
+def days_between(a, b):
+    """Calendar days from date string a to date string b (YYYY-MM-DD)."""
+    import datetime as _dt
+    p = lambda x: _dt.date(int(x[:4]), int(x[5:7]), int(x[8:10]))  # noqa: E731
+    return (p(b) - p(a)).days
 
 
 def cached_json(key, build):

@@ -32,9 +32,20 @@ Exit code is 0 always (a "no signal" day is not an error); the caller
 (the scheduled task / notification skill) inspects the printed JSON on the
 last line to decide whether to page the user.
 
+Every run also reports how rare today's smoothed reading is over the last ten
+years and what followed similar readings (guidance.py). Given the size of the
+flexible cash sleeve, it turns the target weight into money:
+
 Usage:
-    python asi/check_signal.py
+    python asi/check_signal.py [--reserve AMOUNT --funds N [--invested AMOUNT]]
+
+--reserve   the flexible cash sleeve the strategy manages (core holdings are
+            never part of it and never sold)
+--funds     how many funds the sleeve is spread over, evenly
+--invested  how much of the sleeve is in the funds right now; defaults to the
+            amount the rule's state entering today implies
 """
+import argparse
 import json
 import os
 import sys
@@ -44,6 +55,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import actionable as A          # noqa: E402
 import fetch                    # noqa: E402
+import guidance as G            # noqa: E402
 import history                  # noqa: E402
 import run_daily                # noqa: E402
 from compute import compute, InsufficientData  # noqa: E402
@@ -97,12 +109,22 @@ def replay(smoothed):
     return prior, new_state, weight
 
 
-def main():
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description="Daily ASI signal check.")
+    p.add_argument("--reserve", type=float)
+    p.add_argument("--funds", type=int, default=1)
+    p.add_argument("--invested", type=float)
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
     # One cached request; sizes the re-score window to cover every day since
     # asi_history.csv was last committed.
     idx_dates = [r[0] for r in fetch.index_daily()]
     today = idx_dates[-1]
-    committed = [(r["date"], r["asi_v2"]) for r in history.load()
+    hist_rows = history.load()
+    committed = [(r["date"], r["asi_v2"]) for r in hist_rows
                  if r["asi_v2"] is not None and r["date"] < today]
     through = committed[-1][0] if committed else ""
     missing = gap_dates(through, idx_dates[-MAX_WINDOW:], today)
@@ -134,6 +156,20 @@ def main():
         "history_through": through,
         "recomputed_days": len(seq) - len(committed) - 1,
     }
+
+    close_by_date = {r["date"]: r["close"] for r in hist_rows}
+    close_by_date.update({r["date"]: r["close"] for r in recent_panel})
+    close_by_date[date] = ip["close"]
+    g_series = [(d, close_by_date[d], sm) for (d, _s), sm in zip(seq, smoothed)
+                if close_by_date.get(d) is not None]
+    side = G.side_of(smoothed[-1], g_series)
+    out["guidance"] = {"rarity": G.rarity(smoothed[-1], g_series, side),
+                       "odds": G.odds(smoothed[-1], g_series, side)}
+    if args.reserve:
+        prior_weight = A.STATE_WEIGHT[prior_state]
+        invested = args.invested if args.invested is not None else prior_weight * args.reserve
+        out["sleeve_plan"] = G.sleeve_plan(new_weight, args.reserve, args.funds, invested, triggered)
+        out["sleeve_plan"]["invested_assumed"] = args.invested is None
 
     if triggered:
         out["alert"] = (

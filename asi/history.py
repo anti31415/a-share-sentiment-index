@@ -8,6 +8,7 @@ import csv, os, sys
 
 import erp as erp_mod
 import fetch
+import iv as iv_mod
 import limitboard
 import margin
 import series
@@ -19,10 +20,11 @@ import sentiment_index_v1 as v1                                # noqa: E402
 
 OUT = os.path.join(HERE, "data", "asi_history.csv")
 COLS = ["date", "close", "broken_net_rate", "bn_z10y", "erp", "breadth", "new_low",
-        "vol_ratio", "ret5", "vol_temp", "rsi14", "bias60", "drawdown",
-        "margin_chg5", "limit_up_rate", "limit_down_rate", "max_consec_limit",
+        "new_high_rate", "vol_ratio", "ret5", "vol_temp", "iv_temp", "rsi14",
+        "bias60", "drawdown", "margin_chg5", "margin_buy_ratio",
+        "limit_up_rate", "limit_down_rate", "max_consec_limit",
         "n_sample", "asi_v2", "coverage", "zone_v2", "asi_v2_noerp",
-        "asi_v2_nolvspec", "asi_v1"]
+        "asi_v2_nolvspec", "asi_v2_nov3", "asi_v1"]
 
 Z_WINDOW = 2520      # ~10 trading years
 Z_MIN = 250          # need at least a year of data before giving a Z-score, avoids a noisy small-sample reading
@@ -56,9 +58,10 @@ def rolling_z(vals):
     return out
 
 
-V2_KEYS = ("broken_net_rate", "erp", "breadth", "new_low", "vol_temp",
-           "rsi14", "bias60", "drawdown",
-           "margin_chg5", "limit_up_rate", "limit_down_rate", "max_consec_limit")
+V2_KEYS = ("broken_net_rate", "erp", "breadth", "new_low", "new_high_rate",
+           "vol_temp", "iv_temp", "rsi14", "bias60", "drawdown",
+           "margin_chg5", "margin_buy_ratio",
+           "limit_up_rate", "limit_down_rate", "max_consec_limit")
 
 
 def v2_row(rec):
@@ -96,6 +99,20 @@ def v2_row_nolvspec(rec):
         return None
 
 
+NOV3_KEYS = tuple(k for k in V2_KEYS if k not in ("new_high_rate", "iv_temp", "margin_buy_ratio"))
+
+
+def v2_row_nov3(rec):
+    """Comparison score with the three round-3 additions (new_high_rate,
+    iv_temp, margin_buy_ratio) removed -- isolates what this round actually
+    added on top of the already-shipped v2 model."""
+    vals = {k: rec.get(k) for k in NOV3_KEYS}
+    try:
+        return compute(vals, require_valuation=False)
+    except InsufficientData:
+        return None
+
+
 def v1_row(rec):
     """Feeds the exact same inputs into the old model (bugs included), for a fair comparison."""
     vals = {"broken_net_rate": rec.get("broken_net_rate"),
@@ -117,6 +134,8 @@ def build(n_sample=900, seed=20260902):
 
     erp_by_date = erp_mod.daily_series(dates)
     margin_by_date = margin.chg5_series(dates)
+    margin_buy_by_date = margin.buy_ratio_series(dates)
+    iv_by_date = iv_mod.daily_series(dates)
 
     print("      Reconstructing limit-up/streaks: loading cached daily bars for %d sampled stocks..."
           % len(sample), flush=True)
@@ -131,6 +150,8 @@ def build(n_sample=900, seed=20260902):
         d = rec["date"]
         rec["erp"] = erp_by_date.get(d)
         rec["margin_chg5"] = margin_by_date.get(d)
+        rec["margin_buy_ratio"] = margin_buy_by_date.get(d)
+        rec["iv_temp"] = iv_by_date.get(d)
         rec["limit_up_rate"] = lb[d]["up_rate"]
         rec["limit_down_rate"] = lb[d]["down_rate"]
         rec["max_consec_limit"] = lb[d]["max_consec"] if lb[d]["up_rate"] is not None else None
@@ -140,16 +161,20 @@ def build(n_sample=900, seed=20260902):
         r2 = v2_row(rec)
         r2n = v2_row_noerp(rec)
         r2ls = v2_row_nolvspec(rec)
+        r2v3 = v2_row_nov3(rec)
         r1 = v1_row(rec)
         rows.append({
             "date": rec["date"], "close": round(rec["close"], 2),
             "broken_net_rate": _r(rec.get("broken_net_rate")),
             "erp": _r(rec.get("erp"), 3),
             "breadth": _r(rec.get("breadth")), "new_low": _r(rec.get("new_low")),
+            "new_high_rate": _r(rec.get("new_high_rate")),
             "vol_ratio": _r(rec.get("vol_ratio"), 3), "ret5": _r(rec.get("ret5")),
-            "vol_temp": _r(rec.get("vol_temp")), "rsi14": _r(rec.get("rsi14")),
+            "vol_temp": _r(rec.get("vol_temp")), "iv_temp": _r(rec.get("iv_temp")),
+            "rsi14": _r(rec.get("rsi14")),
             "bias60": _r(rec.get("bias60")), "drawdown": _r(rec.get("drawdown")),
             "margin_chg5": _r(rec.get("margin_chg5"), 3),
+            "margin_buy_ratio": _r(rec.get("margin_buy_ratio"), 3),
             "limit_up_rate": _r(rec.get("limit_up_rate"), 3),
             "limit_down_rate": _r(rec.get("limit_down_rate"), 3),
             "max_consec_limit": rec.get("max_consec_limit") if rec.get("max_consec_limit") is not None else "",
@@ -158,6 +183,7 @@ def build(n_sample=900, seed=20260902):
             "zone_v2": r2["zone"] if r2 else "",
             "asi_v2_noerp": r2n["score"] if r2n else "",
             "asi_v2_nolvspec": r2ls["score"] if r2ls else "",
+            "asi_v2_nov3": r2v3["score"] if r2v3 else "",
             "asi_v1": r1["score"] if r1 else "",
         })
     bn_z = rolling_z([rec.get("broken_net_rate") for rec in panel])

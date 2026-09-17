@@ -39,11 +39,31 @@ from one or more raw indicators:
 | Dimension | Weight | Members | What it measures |
 |---|---|---|---|
 | Valuation despair | 35% | below-book-value rate, equity risk premium (ERP) | how cheap the market is |
-| Trading cooldown | 20% | volume-price temperature | is anyone still trading, and which way |
+| Trading cooldown | 20% | volume-price temperature, 50ETF implied volatility (QVIX) | is anyone still trading, and how much fear is priced into options |
 | Price momentum | 20% | RSI(14), BIAS(60), drawdown depth (median of the three) | how far price has fallen from normal |
-| Market breadth | 10% | advancers share, new-52-week-low share | broad-based selling vs. structural |
-| Leverage sentiment | 10% | margin (financing) balance 5-day change | is leveraged money adding or being forcibly liquidated |
+| Market breadth | 10% | advancers share, new-52-week-low share, new-52-week-high share | broad-based selling vs. buying vs. structural |
+| Leverage sentiment | 10% | margin (financing) balance 5-day change, financing buy ratio | is leveraged money adding or being forcibly liquidated, and how actively |
 | Speculation extremity | 5% | limit-up share, limit-down share, longest limit-up streak | how frothy or panicked is the tape |
+
+**2026-09 round 3:** added `iv_temp` (50ETF QVIX), `new_high_rate`, and
+`margin_buy_ratio` per a user follow-up request (dimension weights
+unchanged, each slots into an existing dimension as an additional member).
+Two other candidates from the same request were tested and *not* added: a
+combined financing+securities-lending balance correlates 0.998 with the
+existing financing-only balance and added nothing; a true financing-buy /
+whole-market-turnover ratio isn't reconstructable from data this project
+already fetches (Sina's index klines carry share volume, not turnover
+value), so `margin_buy_ratio` is defined against the financing balance
+instead. Effect, measured against the same forward-return backtest: the
+raw rank correlation with the forward-120-day return got very slightly
+*weaker* (Spearman -0.263 -> -0.256, a ~3% relative loss) -- these three
+indicators add a bit of broad-sample noise. But the metric that actually
+matters for this project -- the tactical satellite-sleeve backtest below --
+improved: CAGR 2.99% -> 3.28%, Calmar 0.234 -> 0.253, **and trade count
+dropped from 32 to 18** (fewer false hysteresis triggers), because iv_temp
+in particular smooths out some single-day whipsaw in the 5-day-smoothed
+signal. Kept for that reason, with the trade-off stated plainly rather
+than cherry-picking whichever number looks better.
 
 0 = extreme panic / blood in the streets. 100 = extreme greed / the fat tail
 of a rally. Full anchor tables and the reasoning behind every weight are in
@@ -53,11 +73,11 @@ of a rally. Full anchor tables and the reasoning behind every weight are in
 
 | Score | Zone | What the backtest actually shows there |
 |---|---|---|
-| 0-15 | Ice-cold | fwd 120d **+22.9%**, win rate 90.3% |
-| 15-30 | Pessimistic | fwd 120d **+14.1%**, win rate 84.2% |
-| 30-60 | Neutral | fwd 120d +5.4%, win rate 58.9% |
-| 60-80 | **Optimistic ("no edge")** | fwd 120d **+1.1%**, win rate **44.4%** -- the worst bucket of all five |
-| 80-100 | Greed | fwd 120d +12.0%, win rate 53.5% -- momentum still runs, but the deepest interim drawdown of the five |
+| 0-15 | Ice-cold | fwd 120d **+23.2%**, win rate 94.1% |
+| 15-30 | Pessimistic | fwd 120d **+21.7%**, win rate 90.4% |
+| 30-60 | Neutral | fwd 120d +7.1%, win rate 59.0% |
+| 60-80 | **Optimistic ("no edge")** | fwd 120d **-2.4%**, win rate **42.4%** -- the only bucket with a genuinely negative average forward return |
+| 80-100 | Greed | fwd 120d +9.1%, win rate 59.0% -- momentum still runs, but historically the most volatile zone |
 
 The original boundaries were (0, 15, 30, 70, 85, 100), set by intuition. A
 rolling 150-day scan of forward-120-day returns across the full sample found
@@ -66,6 +86,12 @@ that the genuinely "no edge, forward returns often negative" zone is 60-80
 top of "neutral" -- while the old "greed zone 85-100" actually has *positive*
 forward returns (no top forms within a 120-day window) and is simply the
 most volatile zone. The boundary moved to 60/80 to match what the data shows.
+(The bucket numbers above reflect the 2026-09 momentum-dimension
+reweighting described further down -- the 60/80 boundaries themselves held
+up under a fresh population-percentile check against the new score's
+distribution, so they weren't moved again; only the numbers inside each
+bucket changed, and the "no edge" bucket got noticeably cleaner -- now
+genuinely negative rather than barely positive.)
 
 ## What's provably true, and what isn't
 
@@ -73,14 +99,15 @@ The project's whole point is to not overclaim. Here's the honest ledger:
 
 **Holds up under a real, non-self-referential backtest:**
 - Full-sample Spearman correlation between ASI and the forward-120-day
-  return: **-0.263** (v2) vs. **-0.130** (v1, the original flat six-indicator
-  design) -- a meaningfully cleaner ranking signal.
+  return: **-0.381** (v2, after the 2026-09 dimension-reweighting round) vs.
+  **-0.130** (v1, the original flat six-indicator design) -- a meaningfully
+  cleaner ranking signal.
 - Signal-driven satellite-sleeve purchases (see below) averaged a purchase
-  price **13.0% below** the plain period-average price.
+  price **11.6% below** the plain period-average price.
 - A moving-block bootstrap (2,000 iterations, block=120 days, to avoid the
   inflated significance overlapping windows create) puts the ice-cold
-  bucket's excess forward return at **p ≈ 0.09** -- suggestive, not proof;
-  21 years only produced 31 ice-cold days total.
+  bucket's excess forward return at **p ≈ 0.06** -- suggestive, not proof;
+  21 years only produced 34 ice-cold days total.
 
 **Does not hold up, and is flagged as such in the code:**
 - The asymmetric "confirm before buying" rule (wait for 3 consecutive days
@@ -108,9 +135,9 @@ timing the core holding isn't the right goal. Instead:
   exposure, driven by a **5-day-smoothed** ASI (single-day noise is
   irrelevant when execution takes 5-10 days anyway).
 - A **hysteresis state machine** only acts at the two zones actually
-  validated by backtest -- entering "Pessimistic (add)" below 25, entering
-  "Optimistic (trim)" in 65-80 -- and only on the *first* crossing of a
-  zone, not every day the reading stays there. The 30-65 "no edge" middle
+  validated by backtest -- entering "Pessimistic (add)" below 28, entering
+  "Optimistic (trim)" in 52-75 -- and only on the *first* crossing of a
+  zone, not every day the reading stays there. The middle "no edge" band
   is left alone entirely.
 
 Backtested over the last 10 years (2016-09 onward) with an 8-day execution
@@ -120,11 +147,53 @@ max drawdown, and Calmar ratio. Full numbers, the exact state thresholds,
 and an operating playbook are in `asi/report_actionable.py`'s output and
 `.claude/skills/asi-signal-check/SKILL.md`.
 
+**2026-09 round 4 (a user follow-up on weighting methodology):** the user
+asked what statistical method should set factor weights -- logistic
+regression, XGBoost, IC-weighting? Two real experiments came out of it,
+both documented in `asi/indicators.py` and `asi/actionable.py`:
+
+1. *Full IC/IR-weighted composite, tested properly out-of-sample* (weights
+   fit on 2005-2020 only, evaluated purely on 2021-2026): looked spectacular
+   in-sample (fwd120 Spearman -0.256 -> -0.470) and then **lost to the
+   hand-set weights out-of-sample** (-0.363 vs -0.280). Not adopted --
+   direct empirical evidence for why tree/regression-based factor weighting
+   is risky here: ~21 years of daily data sounds like a lot, but the number
+   of genuinely *independent* extreme-regime events (2015 leverage bull/bust,
+   2018, 2020, 2024-02) is closer to a dozen, and a high-freedom model fits
+   the specifics of those dozen rather than anything general.
+2. *The price-momentum dimension's direction, re-examined the same way*:
+   RSI(14)/BIAS(60)/drawdown were originally treated as contrarian
+   (stretched -> expect reversion), but measured IC -- **including when fit
+   on 2005-2020 only and checked purely out-of-sample on 2021-2026** -- says
+   they're mild 120-day trend-*continuation* signals instead. This one
+   generalized, so it shipped: the dimension's own reading is unchanged
+   (still "high = market feels strong"), but its contribution to the
+   composite is now inverted, its weight cut 20%->5%, and the 15 points
+   freed went to the valuation dimension (35%->50%, by far the strongest
+   and most robust factor by IC). Full-sample Spearman improved -0.256 ->
+   -0.381, and the "no edge" bucket's forward return flipped from +0.9% to
+   a genuinely negative -2.4%.
+
+That weight change alone *broke* the hysteresis strategy above (its fixed
+score thresholds were calibrated to the old score scale; trade count
+collapsed from 18 to 8 and CAGR/Calmar both dropped), so the thresholds
+were re-derived from a local return-curve scan on the strategy's own
+2016-2026 operating window -- CAGR 3.03% -> **5.25%**, Calmar 0.191 ->
+**0.498**, max drawdown -15.8% -> **-10.5%**. Stated plainly: **this
+threshold recalibration is NOT out-of-sample validated** the way the
+weight change above was -- a single ~10-year window with a couple dozen
+trades doesn't leave enough data to hold out a test period and still have
+anything to evaluate, so treat these specific numbers (28/40/52/75/46/76)
+as a reasonable, data-informed estimate carrying real overfitting risk, not
+a proven result, and revisit once more years of genuinely new data exist.
+
 **Caveat stated plainly:** over this particular 10-year window the smoothed
 ASI never actually reached the two most extreme states (below 15, or above
-80) -- it ranged 17.3 to 72.1. Those extreme tiers exist as a safety net for
-market conditions more severe than anything 2016-2026 produced, not as
-something this specific backtest window proves works.
+~78) -- the score's own scale changed with the 2026-09 reweighting, so
+exact historical range figures are due for a refresh; the qualitative point
+stands: those extreme tiers exist as a safety net for market conditions
+more severe than anything 2016-2026 produced, not as something this
+specific backtest window proves works.
 
 ## Data sources (all free, no API key)
 
@@ -133,7 +202,8 @@ something this specific backtest window proves works.
 | Sina `CN_MarketData.getKLineData` | Unadjusted daily bars, index & stock | back to 2001 |
 | Sina `hs_a` node | Full A-share listing + live PB | current snapshot |
 | East Money `datacenter-web` (`RPT_F10_FINANCE_MAINFINADATA`) | Per-stock annual-report book value per share | as reported |
-| akshare `stock_margin_account_info` (wraps East Money) | Nationwide margin (financing) balance | 2012-09-27+ |
+| akshare `stock_margin_account_info` (wraps East Money) | Nationwide margin (financing) balance, securities-lending balance, financing buy amount | 2012-09-27+ |
+| akshare `index_option_50etf_qvix` | SSE 50ETF options QVIX (China's rough VIX analogue) | 2015-02-09+ |
 | China Central Depository & Clearing 10-year yield (via akshare `bond_china_yield`) | 10-year government bond yield | 2021-09+ (see note below) |
 | legulegu `index-basic-pe` | CSI300 cap-weighted TTM PE | monthly, 2005-04+ |
 

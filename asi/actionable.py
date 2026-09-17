@@ -111,17 +111,33 @@ def zone_target(score, bands=SATELLITE_BANDS):
 
 
 # State-machine hysteresis band -- only fires at the two ends genuinely
-# validated by backtest; the 60-80 "no edge" zone is deliberately not
-# actively traded (both entering and exiting it get repeatedly whipsawed by
-# the 30-60/60-80 boundary), so 30-100 is left alone entirely. The ENTER
-# threshold is more extreme than the EXIT threshold, creating a buffer that
-# cuts down on back-and-forth churn.
+# validated by backtest; the "no edge" middle zone is deliberately not
+# actively traded (entering and exiting it repeatedly gets whipsawed at the
+# boundary), so it's left alone entirely. The ENTER threshold is more
+# extreme than the EXIT threshold, creating a buffer that cuts down on
+# back-and-forth churn.
+#
+# REVISED 2026-09 (thresholds only -- the underlying asi_v2 scale itself
+# changed the same day, see indicators.py's momentum-dimension note). A
+# rolling local-window scan of forward-120d return against the *smoothed*
+# score, run only on this strategy's own 2016-09+ operating window, found
+# the genuinely worst pocket sits around score 52-59 (win rate falls to
+# single digits there), not 65-80 as under the old score scale -- the old
+# 65/80 trim thresholds were barely being reached at all post-reweight,
+# which is why trade count had collapsed to 8 and the backtest degraded.
+# These thresholds are NOT out-of-sample validated the way the dimension
+# reweighting was (there isn't enough independent history in a single
+# ~10-year window to hold out a test period and still have any trades left
+# to evaluate) -- kept a few points wider than the exact empirical trough
+# (52-75, not 52-60) specifically to avoid curve-fitting to that one pocket,
+# but this is a real, higher-than-usual overfitting risk that should be
+# revisited once a few more years of out-of-sample data exist.
 HYST_STATES = [
     # state name, satellite weight, entry condition (reading), exit condition (reading returns into this range to exit)
     {"name": "Ice-cold (full)", "weight": 1.00, "enter": lambda s: s < 15, "exit": lambda s: s >= 25},
-    {"name": "Pessimistic (add)", "weight": 0.75, "enter": lambda s: s < 25, "exit": lambda s: s >= 40},
+    {"name": "Pessimistic (add)", "weight": 0.75, "enter": lambda s: s < 28, "exit": lambda s: s >= 40},
     {"name": "Neutral (default)", "weight": 0.50, "enter": None, "exit": None},
-    {"name": "Optimistic (trim)", "weight": 0.20, "enter": lambda s: 65 <= s < 80, "exit": lambda s: s < 55 or s >= 80},
+    {"name": "Optimistic (trim)", "weight": 0.20, "enter": lambda s: 52 <= s < 75, "exit": lambda s: s < 46 or s >= 76},
 ]
 
 
@@ -136,20 +152,22 @@ def hyst_zone_target(score, state):
     Returns (new state name, the satellite weight for that new state) --
     the weight is always determined by the NEW state, never the old one.
     """
+    # Thresholds must match HYST_STATES above -- see its 2026-09 note for
+    # why these moved off the original 15/25/40/65/80/55 set.
     if state == "Ice-cold (full)":
         new_state = "Neutral (default)" if score >= 25 else state
     elif state == "Pessimistic (add)":
         new_state = "Neutral (default)" if score >= 40 else state
     elif state == "Optimistic (trim)":
-        new_state = "Neutral (default)" if (score < 55 or score >= 80) else state
+        new_state = "Neutral (default)" if (score < 46 or score >= 76) else state
     else:
         # currently neutral -- check whether an extreme state should fire
         # (priority: ice-cold > pessimistic > optimistic)
         if score < 15:
             new_state = "Ice-cold (full)"
-        elif score < 25:
+        elif score < 28:
             new_state = "Pessimistic (add)"
-        elif 65 <= score < 80:
+        elif 52 <= score < 75:
             new_state = "Optimistic (trim)"
         else:
             new_state = "Neutral (default)"

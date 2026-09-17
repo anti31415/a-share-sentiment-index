@@ -111,11 +111,19 @@ def compute(values, min_coverage=0.70, require_valuation=True):
                          "score": None, "missing": True, "members": members})
             continue
         ds = _median(got) if d["agg"] == "median" else sum(got) / len(got)
-        total += ds * d["weight"]
+        # invert_in_composite: this dimension's own score still reads
+        # normally (e.g. "momentum 61.8" = market feels warm), but its
+        # CONTRIBUTION to the composite is flipped -- see indicators.py's
+        # note on the momentum dimension for why (measured IC, both
+        # in-sample and out-of-sample on a 2005-2020/2021-2026 split, shows
+        # it's a mild 120-day *continuation* signal, not the reversion
+        # signal the rest of the composite assumes).
+        cs = (100.0 - ds) if d.get("invert_in_composite") else ds
+        total += cs * d["weight"]
         eff_w += d["weight"]
         dims.append({"key": d["key"], "name": d["name"], "weight": d["weight"],
                      "score": round(ds, 1), "missing": False, "members": members,
-                     "contrib": round(ds * d["weight"] / W_TOTAL, 1)})
+                     "contrib": round(cs * d["weight"] / W_TOTAL, 1)})
 
     if eff_w == 0:
         raise InsufficientData("No valid dimensions at all.")

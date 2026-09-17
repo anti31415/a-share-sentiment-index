@@ -41,6 +41,18 @@ INDICATORS = {
         "desc": "2-D paired reading of volume multiple x price direction "
                 "(see vol_temp_score).",
     },
+    "iv_temp": {
+        "name": "Implied volatility (50ETF QVIX)", "unit": "pts", "direction": "neg",
+        "anchors": [(9, 92), (13, 78), (17, 60), (19.3, 50),
+                    (24, 35), (31, 18), (48, 5), (64, 0)],
+        "desc": "SSE 50ETF options QVIX (China's rough VIX analogue). Added "
+                "2026-09 per user request. Anchors are percentile-based "
+                "(median 19.3) but pinned at the extremes to real history: "
+                "63.79 is the all-time high, 2015-08-26 (the day after Black "
+                "Monday); 8.31 is the all-time low, 2017-05-11, deep in a "
+                "slow grind-up bull. Data starts 2015-02-09 (50ETF options' "
+                "own launch date) -- missing before that.",
+    },
     "rsi14": {
         "name": "RSI(14)", "unit": "", "direction": "pos",
         "anchors": [(20, 0), (30, 14), (40, 34), (50, 50),
@@ -73,6 +85,17 @@ INDICATORS = {
         "desc": "Share of stocks making a new 52-week low that day. A direct "
                 "measure of indiscriminate selling.",
     },
+    "new_high_rate": {
+        "name": "New-high share", "unit": "%", "direction": "pos",
+        "anchors": [(0.0, 15), (0.5, 30), (1.2, 50), (3.0, 65),
+                    (6.0, 78), (10.5, 88), (22.6, 96), (38.2, 100)],
+        "desc": "Share of stocks making a new 252-day high that day -- the "
+                "exact mirror of new_low_rate, added 2026-09 per user "
+                "request. Heavily right-skewed (median 1.2%, p95 10.5%) so "
+                "anchors are percentile-based through the middle, pinned at "
+                "the top to 2015-06-12 (38.2%, the leverage-bull peak) and "
+                "2015-06-08 (22.6%, four trading days before it).",
+    },
     "margin_chg5": {
         "name": "Margin balance 5-day change", "unit": "%", "direction": "pos",
         "anchors": [(-29, 0), (-7, 15), (-2.5, 35), (0, 50),
@@ -83,6 +106,22 @@ INDICATORS = {
                 "deleveraging stampede); -7% matches 2024-02-08 (the "
                 "snowball/DMA crisis low). Data starts 2012-09; the dimension "
                 "is missing before that.",
+    },
+    "margin_buy_ratio": {
+        "name": "Financing buy ratio", "unit": "%", "direction": "pos",
+        "anchors": [(2.2, 5), (3.2, 20), (4.0, 35), (5.2, 50),
+                    (7.4, 65), (9.9, 82), (15.1, 95), (28.9, 100)],
+        "desc": "Today's financing (margin) purchase amount as a % of the "
+                "prior day's financing balance ('融资买入占比') -- how "
+                "aggressively new leveraged money is buying relative to the "
+                "money already outstanding; more activity-sensitive than "
+                "the balance-level change alone. Added 2026-09 per user "
+                "request. Anchors are percentile-based (median 5.2%); 9.9% "
+                "matches 2015-06-12, the leverage-bull peak. A [combined] "
+                "financing+securities-lending balance change was also "
+                "computed and tested but dropped -- it correlates 0.998 "
+                "with margin_chg5 (securities-lending balance is a tiny "
+                "fraction of the total) and added nothing beyond noise.",
     },
     "limit_up_rate": {
         "name": "Limit-up share", "unit": "%", "direction": "pos",
@@ -110,7 +149,7 @@ INDICATORS = {
 }
 
 DIMENSIONS = [
-    {"key": "valuation", "name": "Valuation despair", "weight": 35, "required": True,
+    {"key": "valuation", "name": "Valuation despair", "weight": 50, "required": True,
      "members": ["broken_net_rate", "erp"], "agg": "mean",
      "note": "How cheap is the market. ERP was added 2026-09 (review 6.4) but "
              "only has ~5 years of data -- before 2021-09 this dimension is "
@@ -118,26 +157,63 @@ DIMENSIONS = [
              "deliberate: the below-book-value rate has 21-year absolute "
              "anchors and its weight shouldn't be diluted too much by ERP, "
              "so the two are averaged with equal weight rather than giving "
-             "ERP its own separate weight band."},
+             "ERP its own separate weight band. Weight raised 35->50 in "
+             "2026-09's IC-diagnostic pass -- by a wide margin the strongest "
+             "and most out-of-sample-robust dimension (broken_net_rate and "
+             "erp alone carry IC -0.41 / -0.57 against fwd120, vs single "
+             "digits or worse for everything else), and it absorbed the "
+             "weight freed from the momentum dimension below."},
     {"key": "cooling", "name": "Trading cooldown", "weight": 20, "required": False,
-     "members": ["vol_temp"], "agg": "mean",
-     "note": "Is anyone still trading, and in which direction."},
-    {"key": "momentum", "name": "Price momentum", "weight": 20, "required": False,
-     "members": ["rsi14", "bias60", "drawdown"], "agg": "median",
+     "members": ["vol_temp", "iv_temp"], "agg": "mean",
+     "note": "Is anyone still trading, and in which direction. iv_temp "
+             "(50ETF QVIX) added 2026-09 -- correlates with vol_temp but "
+             "isn't the same signal (one reads today's volume/price, the "
+             "other reads the options market's forward-looking fear "
+             "pricing), so both are kept and averaged."},
+    {"key": "momentum", "name": "Price momentum", "weight": 5, "required": False,
+     "members": ["rsi14", "bias60", "drawdown"], "agg": "median", "invert_in_composite": True,
      "note": "How far from normal has price fallen. Three collinear "
-             "indicators, take the median -- counts as one vote."},
+             "indicators, take the median -- counts as one vote. "
+             "REVISED 2026-09 per a user follow-up request to re-examine "
+             "this dimension's assumptions using measured IC: the original "
+             "design implicitly treated 'price has fallen a lot / RSI & "
+             "BIAS are stretched' as a contrarian, mean-reverting signal "
+             "(like valuation). Measured Spearman IC against fwd20/60/120 "
+             "returns says the opposite -- all three members are "
+             "POSITIVELY correlated with forward returns at every horizon "
+             "(e.g. bias60: +0.13/+0.21/+0.15 on fwd20/60/120, fit on "
+             "2005-2020 ONLY), meaning at these horizons this dimension "
+             "behaves as 120-day trend CONTINUATION, not reversion -- "
+             "'market feels strong' tends to keep being followed by 'market "
+             "does fine,' not by a snapback. Two changes follow: (1) "
+             "invert_in_composite=True -- the dimension's own score still "
+             "reads normally (high = market feels strong), but its "
+             "contribution to the composite is flipped, so it no longer "
+             "fights the valuation dimension's reversion assumption; (2) "
+             "weight cut 20->5 -- an out-of-sample test (weights/flip "
+             "decided on 2005-2020, evaluated purely on 2021-2026) showed "
+             "flipping alone already helps (fwd120 OOS Spearman -0.363 -> "
+             "-0.486) and cutting the weight to 5% (with the freed 15% "
+             "going to valuation) performs best of the candidates tried "
+             "(-0.502) -- kept at 5% rather than dropped to 0% mainly for "
+             "interpretability (the dashboard still shows a momentum "
+             "reading) since 0% scored almost identically (-0.500)."},
     {"key": "breadth", "name": "Market breadth", "weight": 10, "required": False,
-     "members": ["breadth", "new_low"], "agg": "mean",
-     "note": "Is this indiscriminate selling or not."},
+     "members": ["breadth", "new_low", "new_high_rate"], "agg": "mean",
+     "note": "Is this indiscriminate selling (or buying) or not. new_high_rate "
+             "added 2026-09 as the symmetric counterpart to new_low -- who's "
+             "making new highs, not just who's making new lows."},
     {"key": "leverage", "name": "Leverage sentiment", "weight": 10, "required": False,
-     "members": ["margin_chg5"], "agg": "mean",
-     "note": "Added 2026-09. The direction of the margin balance reflects "
-             "whether leveraged money is adding or being forcibly liquidated "
-             "-- collapse-style deleveraging is a common thread across every "
-             "A-share crisis (2015, 2018, 2024-02), but data only exists from "
-             "2012-09, so the weight is kept modest (10%); before 2012 this "
-             "dimension is missing and handled by effective-weight "
-             "renormalization."},
+     "members": ["margin_chg5", "margin_buy_ratio"], "agg": "mean",
+     "note": "Added 2026-09 (margin_chg5), extended 2026-09 (margin_buy_ratio). "
+             "The direction of the margin balance reflects whether leveraged "
+             "money is adding or being forcibly liquidated -- collapse-style "
+             "deleveraging is a common thread across every A-share crisis "
+             "(2015, 2018, 2024-02); margin_buy_ratio adds a same-day "
+             "activity-intensity read on top of the balance-level trend. "
+             "Data only exists from 2012-09, so the weight is kept modest "
+             "(10%); before 2012 this dimension is missing and handled by "
+             "effective-weight renormalization."},
     {"key": "speculation", "name": "Speculation extremity", "weight": 5, "required": False,
      "members": ["limit_up_rate", "limit_down_rate", "max_consec_limit"], "agg": "mean",
      "note": "Added 2026-09, reconstructed from unadjusted prices (see "

@@ -14,6 +14,7 @@ import confirm
 import erp as erp_mod
 import fetch
 import history
+import iv as iv_mod
 import limitboard
 import margin
 import series
@@ -48,6 +49,7 @@ def today_values(n_sample=900):
     # original 4-dimension model instead of the full 6-dimension one used in
     # the backtest.
     margin_by_date = margin.chg5_series(recent_dates)
+    margin_buy_by_date = margin.buy_ratio_series(recent_dates)
     kline_by_code = {}
     for code, mkt, name, _pb in sample:
         k = fetch.stock_daily(fetch.sina_symbol(code, mkt))
@@ -55,17 +57,21 @@ def today_values(n_sample=900):
             kline_by_code[code] = k
     lb = limitboard.cross_section(sample, recent_dates, kline_by_code)
     erp_today = erp_mod.daily_series(recent_dates).get(d)
+    iv_today = iv_mod.daily_series(recent_dates).get(d)
 
     return d, {
         "broken_net_rate": round(bn, 2),
         "erp": erp_today,
         "breadth": round(sum(br) / len(br), 2) if br else None,
         "new_low": round(cs[d]["new_low"], 2) if cs[d]["new_low"] is not None else None,
+        "new_high_rate": round(cs[d]["new_high_rate"], 2) if cs[d]["new_high_rate"] is not None else None,
         "vol_temp": ip.get("vol_temp"),
+        "iv_temp": iv_today,
         "rsi14": ip.get("rsi14"),
         "bias60": ip.get("bias60"),
         "drawdown": ip.get("drawdown"),
         "margin_chg5": margin_by_date.get(d),
+        "margin_buy_ratio": margin_buy_by_date.get(d),
         "limit_up_rate": lb[d]["up_rate"],
         "limit_down_rate": lb[d]["down_rate"],
         "max_consec_limit": lb[d]["max_consec"] if lb[d]["up_rate"] is not None else None,
@@ -120,16 +126,22 @@ def main():
     # append-only write, matching the full history.COLS schema
     if hist and hist[-1]["date"] == date:
         return
+    # Column order must match history.COLS exactly -- kept as an explicit
+    # list (rather than a dict-driven writer) so a mismatch is visible on
+    # sight; see tests/test_compute.py for a length/order check against
+    # history.COLS.
     with open(history.OUT, "a", encoding="utf-8-sig", newline="") as f:
         csv.writer(f).writerow([
             date, round(ip["close"], 2), vals["broken_net_rate"], "",
             _r(vals.get("erp"), 3), vals["breadth"], vals["new_low"],
+            _r(vals.get("new_high_rate")),
             _r(ip.get("vol_ratio"), 3), _r(ip.get("ret5")),
-            _r(vals["vol_temp"]), _r(vals["rsi14"]), _r(vals["bias60"]),
-            _r(vals["drawdown"]), _r(vals.get("margin_chg5"), 3),
+            _r(vals["vol_temp"]), _r(vals.get("iv_temp")),
+            _r(vals["rsi14"]), _r(vals["bias60"]), _r(vals["drawdown"]),
+            _r(vals.get("margin_chg5"), 3), _r(vals.get("margin_buy_ratio"), 3),
             _r(vals.get("limit_up_rate"), 3), _r(vals.get("limit_down_rate"), 3),
             vals.get("max_consec_limit") if vals.get("max_consec_limit") is not None else "",
-            "", res["score"], res["coverage"], res["zone"], "", "", ""])
+            "", res["score"], res["coverage"], res["zone"], "", "", "", ""])
     print("Appended a row to asi_history.csv")
 
 

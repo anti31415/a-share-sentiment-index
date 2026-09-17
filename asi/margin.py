@@ -10,10 +10,10 @@ Three derived series feed the "leverage sentiment" dimension:
                           deleveraging and the 2024-02 snowball/DMA crisis
                           both left an early footprint here).
   2. two_margin_chg5   -- same, but on financing + securities-lending
-                          combined ("两融余额"), a slightly broader read on
+                          combined, a slightly broader read on
                           total leveraged exposure.
   3. margin_buy_ratio  -- today's financing purchase amount as a % of the
-                          prior day's financing balance ("融资买入占比"):
+                          prior day's financing balance:
                           how aggressively new leveraged money is buying
                           relative to the money already outstanding, a more
                           activity-sensitive (less inertial) signal than the

@@ -11,6 +11,7 @@ import fetch
 import iv as iv_mod
 import limitboard
 import margin
+import market_stats
 import series
 from compute import compute, InsufficientData
 
@@ -58,7 +59,7 @@ def rolling_z(vals):
     return out
 
 
-V2_KEYS = ("broken_net_rate", "erp", "breadth", "new_low", "new_high_rate",
+V2_KEYS = ("broken_net_rate", "erp",
            "vol_temp", "iv_temp", "rsi14", "bias60", "drawdown",
            "margin_chg5", "margin_buy_ratio",
            "limit_up_rate", "limit_down_rate", "max_consec_limit")
@@ -85,7 +86,7 @@ def v2_row_noerp(rec):
         return None
 
 
-NOLVSPEC_KEYS = ("broken_net_rate", "erp", "breadth", "new_low", "vol_temp",
+NOLVSPEC_KEYS = ("broken_net_rate", "erp", "vol_temp",
                  "rsi14", "bias60", "drawdown")
 
 
@@ -99,12 +100,12 @@ def v2_row_nolvspec(rec):
         return None
 
 
-NOV3_KEYS = tuple(k for k in V2_KEYS if k not in ("new_high_rate", "iv_temp", "margin_buy_ratio"))
+NOV3_KEYS = tuple(k for k in V2_KEYS if k not in ("iv_temp", "margin_buy_ratio"))
 
 
 def v2_row_nov3(rec):
-    """Comparison score with the three round-3 additions (new_high_rate,
-    iv_temp, margin_buy_ratio) removed -- isolates what this round actually
+    """Comparison score with the round-3 additions (iv_temp, margin_buy_ratio;
+    new_high_rate went with the breadth dimension) removed -- isolates what this round actually
     added on top of the already-shipped v2 model."""
     vals = {k: rec.get(k) for k in NOV3_KEYS}
     try:
@@ -145,9 +146,11 @@ def build(n_sample=900, seed=20260902):
         if k:
             kline_by_code[code] = k
     lb = limitboard.cross_section(sample, dates, kline_by_code)
+    below_book = market_stats.below_book_series()
 
     for rec in panel:
         d = rec["date"]
+        rec["broken_net_rate"] = below_book.get(d)
         rec["erp"] = erp_by_date.get(d)
         rec["margin_chg5"] = margin_by_date.get(d)
         rec["margin_buy_ratio"] = margin_buy_by_date.get(d)
@@ -156,36 +159,57 @@ def build(n_sample=900, seed=20260902):
         rec["limit_down_rate"] = lb[d]["down_rate"]
         rec["max_consec_limit"] = lb[d]["max_consec"] if lb[d]["up_rate"] is not None else None
 
-    rows = []
+    rows = [_row(rec) for rec in panel]
+    _write(rows, panel)
+    return rows
+
+
+def rescore():
+    """Rewrites asi_history.csv from its own stored inputs -- no stock
+    scraping. Refreshes the below-book-value column from the direct series
+    (market_stats), then recomputes bn_z10y and every score column. Use after
+    a model change (indicators.py) instead of a full build()."""
+    panel = load()
+    below_book = market_stats.below_book_series()
     for rec in panel:
-        r2 = v2_row(rec)
-        r2n = v2_row_noerp(rec)
-        r2ls = v2_row_nolvspec(rec)
-        r2v3 = v2_row_nov3(rec)
-        r1 = v1_row(rec)
-        rows.append({
-            "date": rec["date"], "close": round(rec["close"], 2),
-            "broken_net_rate": _r(rec.get("broken_net_rate")),
-            "erp": _r(rec.get("erp"), 3),
-            "breadth": _r(rec.get("breadth")), "new_low": _r(rec.get("new_low")),
-            "new_high_rate": _r(rec.get("new_high_rate")),
-            "vol_ratio": _r(rec.get("vol_ratio"), 3), "ret5": _r(rec.get("ret5")),
-            "vol_temp": _r(rec.get("vol_temp")), "iv_temp": _r(rec.get("iv_temp")),
-            "rsi14": _r(rec.get("rsi14")),
-            "bias60": _r(rec.get("bias60")), "drawdown": _r(rec.get("drawdown")),
-            "margin_chg5": _r(rec.get("margin_chg5"), 3),
-            "margin_buy_ratio": _r(rec.get("margin_buy_ratio"), 3),
-            "limit_up_rate": _r(rec.get("limit_up_rate"), 3),
-            "limit_down_rate": _r(rec.get("limit_down_rate"), 3),
-            "max_consec_limit": rec.get("max_consec_limit") if rec.get("max_consec_limit") is not None else "",
-            "n_sample": rec.get("n_sample"),
-            "asi_v2": r2["score"] if r2 else "", "coverage": r2["coverage"] if r2 else "",
-            "zone_v2": r2["zone"] if r2 else "",
-            "asi_v2_noerp": r2n["score"] if r2n else "",
-            "asi_v2_nolvspec": r2ls["score"] if r2ls else "",
-            "asi_v2_nov3": r2v3["score"] if r2v3 else "",
-            "asi_v1": r1["score"] if r1 else "",
-        })
+        rec["broken_net_rate"] = below_book.get(rec["date"])
+    rows = [_row(rec) for rec in panel]
+    _write(rows, panel)
+    return rows
+
+
+def _row(rec):
+    r2 = v2_row(rec)
+    r2n = v2_row_noerp(rec)
+    r2ls = v2_row_nolvspec(rec)
+    r2v3 = v2_row_nov3(rec)
+    r1 = v1_row(rec)
+    return {
+        "date": rec["date"], "close": round(rec["close"], 2),
+        "broken_net_rate": _r(rec.get("broken_net_rate"), 3),
+        "erp": _r(rec.get("erp"), 3),
+        "breadth": _r(rec.get("breadth")), "new_low": _r(rec.get("new_low")),
+        "new_high_rate": _r(rec.get("new_high_rate")),
+        "vol_ratio": _r(rec.get("vol_ratio"), 3), "ret5": _r(rec.get("ret5")),
+        "vol_temp": _r(rec.get("vol_temp")), "iv_temp": _r(rec.get("iv_temp")),
+        "rsi14": _r(rec.get("rsi14")),
+        "bias60": _r(rec.get("bias60")), "drawdown": _r(rec.get("drawdown")),
+        "margin_chg5": _r(rec.get("margin_chg5"), 3),
+        "margin_buy_ratio": _r(rec.get("margin_buy_ratio"), 3),
+        "limit_up_rate": _r(rec.get("limit_up_rate"), 3),
+        "limit_down_rate": _r(rec.get("limit_down_rate"), 3),
+        "max_consec_limit": _int_or_blank(rec.get("max_consec_limit")),
+        "n_sample": _int_or_blank(rec.get("n_sample")),
+        "asi_v2": r2["score"] if r2 else "", "coverage": r2["coverage"] if r2 else "",
+        "zone_v2": r2["zone"] if r2 else "",
+        "asi_v2_noerp": r2n["score"] if r2n else "",
+        "asi_v2_nolvspec": r2ls["score"] if r2ls else "",
+        "asi_v2_nov3": r2v3["score"] if r2v3 else "",
+        "asi_v1": r1["score"] if r1 else "",
+    }
+
+
+def _write(rows, panel):
     bn_z = rolling_z([rec.get("broken_net_rate") for rec in panel])
     for row, z in zip(rows, bn_z):
         row["bn_z10y"] = "" if z is None else z
@@ -193,7 +217,10 @@ def build(n_sample=900, seed=20260902):
         w = csv.DictWriter(f, fieldnames=COLS)
         w.writeheader()
         w.writerows(rows)
-    return rows
+
+
+def _int_or_blank(x):
+    return "" if x is None else int(x)
 
 
 def _r(x, n=2):
@@ -214,8 +241,11 @@ def load():
 
 
 if __name__ == "__main__":
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else 900
-    rs = build(n)
+    if sys.argv[1:] == ["--rescore"]:
+        rs = rescore()
+    else:
+        n = int(sys.argv[1]) if len(sys.argv) > 1 else 900
+        rs = build(n)
     print("Wrote %s -- %d rows, %s -> %s" % (OUT, len(rs), rs[0]["date"], rs[-1]["date"]))
     ok = [r for r in rs if r["asi_v2"] != ""]
     print("%d rows with a valid ASI; earliest %s" % (len(ok), ok[0]["date"] if ok else "-"))

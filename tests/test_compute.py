@@ -59,10 +59,14 @@ full = {"broken_net_rate": 8.0, "vol_temp": 50.0, "rsi14": 50.0,
 r_full = compute(full)
 ok(near(r_full["coverage"], 1.0), "full inputs -> coverage = 1.0")
 part = dict(full)
-for k in ("breadth", "new_low"):
+for k in ("limit_up_rate", "limit_down_rate", "max_consec_limit"):
     part.pop(k)
 r_part = compute(part)
-ok(near(r_part["coverage"], 0.90), "missing breadth dimension (weight 10%) -> coverage = 0.90")
+ok(near(r_part["coverage"], 0.94), "missing speculation dimension (weight 6%) -> coverage = 0.94")
+ok("breadth" not in [d["key"] for d in DIMENSIONS],
+   "market-breadth dimension is not scored (removed 2026-09-17, see indicators.py)")
+noisy = dict(full, breadth=5.0, new_low=40.0, new_high_rate=0.0)
+ok(near(compute(noisy)["score"], r_full["score"]), "breadth inputs no longer move the score")
 ok(abs(r_part["score"] - r_full["score"]) < 6,
    "losing one dimension only shifts the score a little (%.1f -> %.1f), doesn't collapse to 0"
    % (r_full["score"], r_part["score"]))
@@ -92,8 +96,8 @@ print("\nPrice momentum three-in-one (review 3.1)")
 v = {"broken_net_rate": 8.0, "rsi14": 20.0, "bias60": -20.0, "drawdown": -60.0}
 r = compute(v)
 mom = [d for d in r["dims"] if d["key"] == "momentum"][0]
-ok(mom["weight"] == 5, "price-momentum dimension weight is 5% (v1's three parts summed to 40%; "
-   "cut 20->5 in 2026-09's IC diagnostic pass, see indicators.py)")
+ok(mom["weight"] == 6, "price-momentum dimension weight is 6% (v1's three parts summed to 40%; "
+   "cut 20->5 in 2026-09's IC diagnostic pass, 6 after the breadth removal; see indicators.py)")
 ok(mom["score"] < 10, "dimension score is low when all three are extreme: %.1f" % mom["score"])
 ok(mom["contrib"] > 0, "momentum's own reading is deeply bearish (score %.1f) but "
    "invert_in_composite means its CONTRIBUTION to the total is still positive "
@@ -146,8 +150,8 @@ ok("leverage" in [d["key"] for d in DIMENSIONS], "leverage-sentiment dimension i
 ok("speculation" in [d["key"] for d in DIMENSIONS], "speculation-extremity dimension is registered")
 lev = [d for d in DIMENSIONS if d["key"] == "leverage"][0]
 spec = [d for d in DIMENSIONS if d["key"] == "speculation"][0]
-ok(lev["weight"] == 10, "leverage-sentiment weight is 10%")
-ok(spec["weight"] == 5, "speculation-extremity weight is 5% (deliberately low -- small, volatile sample)")
+ok(lev["weight"] == 11, "leverage-sentiment weight is 11%")
+ok(spec["weight"] == 6, "speculation-extremity weight is 6% (deliberately low -- small, volatile sample)")
 r_crash = compute({"broken_net_rate": 8.0, "margin_chg5": -29.0})
 r_calm = compute({"broken_net_rate": 8.0, "margin_chg5": 0.0})
 ok(r_crash["score"] < r_calm["score"],

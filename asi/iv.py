@@ -17,6 +17,8 @@ import bisect
 import csv
 import os
 
+from net import days_between, fetch
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(HERE, "data", "qvix_50etf.csv")
 
@@ -43,30 +45,60 @@ def fetch_and_save():
     return len(df)
 
 
-def load():
-    """{date: QVIX close}, chronological."""
-    if not os.path.exists(CSV_PATH):
-        fetch_and_save()
+# The committed CSV only advances when fetch_and_save() is rerun and committed.
+# Newer days come from the same optbbs CSV akshare reads (columns 0-4 are the
+# 50ETF QVIX date/open/high/low/close), stdlib only. A value older than this
+# many calendar days is not forward-filled -- a stale IV would otherwise read
+# as a perfectly calm, unchanging market.
+LIVE_URL = "http://1.optbbs.com/d/csv/d/k.csv"
+MAX_STALE_DAYS = 4
+
+
+def _live_rows():
+    try:
+        raw = fetch(LIVE_URL, retries=4)
+    except Exception:                                # noqa: BLE001
+        return {}
     out = {}
-    with open(CSV_PATH, encoding="utf-8-sig") as f:
-        for r in csv.DictReader(f):
-            try:
-                out[r["date"]] = float(r["qvix"])
-            except (KeyError, ValueError):
-                continue
+    for line in raw.splitlines()[1:]:
+        cells = line.split(",")
+        if len(cells) < 5:
+            continue
+        try:
+            y, m, d = (int(x) for x in cells[0].split("/"))
+            out["%04d-%02d-%02d" % (y, m, d)] = float(cells[4])
+        except ValueError:
+            continue
     return out
 
 
-def daily_series(dates):
+def load(live=True):
+    """{date: QVIX close}, chronological."""
+    out = {}
+    if os.path.exists(CSV_PATH):
+        with open(CSV_PATH, encoding="utf-8-sig") as f:
+            for r in csv.DictReader(f):
+                try:
+                    out[r["date"]] = float(r["qvix"])
+                except (KeyError, ValueError):
+                    continue
+    if live:
+        last = max(out) if out else ""
+        out.update({d: v for d, v in _live_rows().items() if d > last})
+    return out
+
+
+def daily_series(dates, live=True):
     """{date: QVIX}, forward-filled onto the given trading-day list (no lookahead --
-    only ever carries the most recent [past] value forward)."""
-    qvix = load()
+    only ever carries the most recent [past] value forward, and never more
+    than MAX_STALE_DAYS)."""
+    qvix = load(live)
     keys = sorted(qvix)
     if not keys:
         return {}
     out = {}
     for d in dates:
         j = bisect.bisect_right(keys, d) - 1
-        if j >= 0:
+        if j >= 0 and days_between(keys[j], d) <= MAX_STALE_DAYS:
             out[d] = qvix[keys[j]]
     return out

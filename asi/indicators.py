@@ -13,6 +13,7 @@ Structural changes relative to v1 (per the code review, sections 3.1 / 3.2):
     pairing]: a heavy-volume decline is panic, not euphoria.
   * Market breadth gained a "% of stocks at a new 52-week low" member,
     alongside the advance/decline ratio, forming the breadth dimension.
+    (Removed from the scored model 2026-09-17 -- see the note above DIMENSIONS.)
 """
 
 # anchors: [(raw value, sentiment score)], must be strictly increasing by raw
@@ -22,8 +23,21 @@ INDICATORS = {
         "name": "Below-book-value rate", "unit": "%", "direction": "neg",
         "anchors": [(0.5, 95), (2.0, 75), (4.0, 55), (7.0, 38),
                     (10.0, 22), (13.0, 10), (16.0, 0)],
-        "desc": "Share of all A-shares trading below price-to-book 1.0. Main "
-                "component of the valuation-despair dimension (21-year absolute anchors).",
+        "desc": "Share of all listed A-shares trading below book value, read "
+                "directly from legulegu (market_stats.py) for both history and "
+                "the live reading. Main component of the valuation-despair "
+                "dimension. Until 2026-09-17 the history was reconstructed "
+                "from a ~900-stock sample drawn from TODAY's listing, which "
+                "read systematically high before ~2014 (survivorship bias: "
+                "2008-11 bottom 21.6% sampled vs 13.3% actual; 2012-12 11.8% "
+                "vs 5.1%); from 2019 on the two agree within ~1pt. The anchors "
+                "were left unchanged: they sit on the post-2019 regime where "
+                "both series agree (2024-02-05 actual = 16.2% -> score 0), and "
+                "a percentile re-mapping onto the direct series backtested no "
+                "better. Consequence: pre-2014 bottoms now read somewhat "
+                "warmer than before (2008-11 scores ~10, not 0) -- structurally "
+                "fewer companies traded below book then; bn_z10y shows the "
+                "era-relative reading.",
     },
     "erp": {
         "name": "Equity risk premium", "unit": "%", "direction": "neg",
@@ -112,7 +126,7 @@ INDICATORS = {
         "anchors": [(2.2, 5), (3.2, 20), (4.0, 35), (5.2, 50),
                     (7.4, 65), (9.9, 82), (15.1, 95), (28.9, 100)],
         "desc": "Today's financing (margin) purchase amount as a % of the "
-                "prior day's financing balance ('融资买入占比') -- how "
+                "prior day's financing balance -- how "
                 "aggressively new leveraged money is buying relative to the "
                 "money already outstanding; more activity-sensitive than "
                 "the balance-level change alone. Added 2026-09 per user "
@@ -148,8 +162,24 @@ INDICATORS = {
     },
 }
 
+# 2026-09-17: the "Market breadth" dimension (advancers share, new-52-week-low
+# share, new-52-week-high share; 10%) was removed and its weight spread
+# proportionally over the rest (rounded to 55/22/6/11/6). Two reasons that
+# point the same way: (1) none of its members has a free whole-market daily
+# source with history -- new lows/highs need a 252-day window that free
+# endpoints cap at 120 days, and advancers share is served for today only --
+# so keeping it meant scraping ~900 stocks every morning, the step behind
+# every rate-limit crash of the cloud check; (2) it wasn't earning its
+# weight: with the direct below-book series, removing it improved fwd60 and
+# fwd120 Spearman IC in each of 2005-10 / 2011-15 / 2016-20 / 2021-26
+# separately (full-sample fwd120 -0.321 -> -0.337; 2021+ -0.496 -> -0.541),
+# and the 8-day-lag satellite sleeve (2016-09+) went from CAGR 4.24% / max
+# drawdown -9.96% / Calmar 0.43 to 4.85% / -9.43% / 0.51 (the pre-change
+# model with the old sample series: 4.86% / -10.54% / 0.46). The indicator definitions
+# above and the history columns are kept for research and the per-sector
+# lines, but nothing below scores them.
 DIMENSIONS = [
-    {"key": "valuation", "name": "Valuation despair", "weight": 50, "required": True,
+    {"key": "valuation", "name": "Valuation despair", "weight": 55, "required": True,
      "members": ["broken_net_rate", "erp"], "agg": "mean",
      "note": "How cheap is the market. ERP was added 2026-09 (review 6.4) but "
              "only has ~5 years of data -- before 2021-09 this dimension is "
@@ -162,15 +192,17 @@ DIMENSIONS = [
              "and most out-of-sample-robust dimension (broken_net_rate and "
              "erp alone carry IC -0.41 / -0.57 against fwd120, vs single "
              "digits or worse for everything else), and it absorbed the "
-             "weight freed from the momentum dimension below."},
-    {"key": "cooling", "name": "Trading cooldown", "weight": 20, "required": False,
+             "weight freed from the momentum dimension below. 50->55 on "
+             "2026-09-17 when the breadth dimension was removed (see note "
+             "above DIMENSIONS)."},
+    {"key": "cooling", "name": "Trading cooldown", "weight": 22, "required": False,
      "members": ["vol_temp", "iv_temp"], "agg": "mean",
      "note": "Is anyone still trading, and in which direction. iv_temp "
              "(50ETF QVIX) added 2026-09 -- correlates with vol_temp but "
              "isn't the same signal (one reads today's volume/price, the "
              "other reads the options market's forward-looking fear "
              "pricing), so both are kept and averaged."},
-    {"key": "momentum", "name": "Price momentum", "weight": 5, "required": False,
+    {"key": "momentum", "name": "Price momentum", "weight": 6, "required": False,
      "members": ["rsi14", "bias60", "drawdown"], "agg": "median", "invert_in_composite": True,
      "note": "How far from normal has price fallen. Three collinear "
              "indicators, take the median -- counts as one vote. "
@@ -198,12 +230,7 @@ DIMENSIONS = [
              "(-0.502) -- kept at 5% rather than dropped to 0% mainly for "
              "interpretability (the dashboard still shows a momentum "
              "reading) since 0% scored almost identically (-0.500)."},
-    {"key": "breadth", "name": "Market breadth", "weight": 10, "required": False,
-     "members": ["breadth", "new_low", "new_high_rate"], "agg": "mean",
-     "note": "Is this indiscriminate selling (or buying) or not. new_high_rate "
-             "added 2026-09 as the symmetric counterpart to new_low -- who's "
-             "making new highs, not just who's making new lows."},
-    {"key": "leverage", "name": "Leverage sentiment", "weight": 10, "required": False,
+    {"key": "leverage", "name": "Leverage sentiment", "weight": 11, "required": False,
      "members": ["margin_chg5", "margin_buy_ratio"], "agg": "mean",
      "note": "Added 2026-09 (margin_chg5), extended 2026-09 (margin_buy_ratio). "
              "The direction of the margin balance reflects whether leveraged "
@@ -214,10 +241,13 @@ DIMENSIONS = [
              "Data only exists from 2012-09, so the weight is kept modest "
              "(10%); before 2012 this dimension is missing and handled by "
              "effective-weight renormalization."},
-    {"key": "speculation", "name": "Speculation extremity", "weight": 5, "required": False,
+    {"key": "speculation", "name": "Speculation extremity", "weight": 6, "required": False,
      "members": ["limit_up_rate", "limit_down_rate", "max_consec_limit"], "agg": "mean",
-     "note": "Added 2026-09, reconstructed from unadjusted prices (see "
-             "limitboard.py), can be backfilled across the full 21 years. "
+     "note": "Added 2026-09. History is reconstructed from the sampled "
+             "stocks' unadjusted prices (limitboard.py); the live reading "
+             "comes from East Money's whole-market limit-up/limit-down pools "
+             "(market_stats.py), which agree closely (2026-09-01: 1.59% vs "
+             "1.57% limit-up, streak 7 vs 6). "
              "Weight is deliberately kept very low (5%) -- limit-up/streak "
              "samples are small and extremely volatile, easily dominated by "
              "one-off extreme events, so this is a supporting signal only, "

@@ -19,12 +19,13 @@ hand-typed or reverse-engineered from "what a bottom should look like."
 pip install -r requirements.txt      # only needed for margin.py / fetch_erp_data.py
 cd asi
 python download.py 900               # pulls & caches raw data (first run only, ~5-10 min)
-python history.py 900                # builds data/asi_history.csv (~5,262 rows)
+python history.py 900                # rebuilds data/asi_history.csv from scratch (~5,262 rows)
+python history.py --rescore          # re-scores the committed history after a model change (seconds)
 python run_daily.py                  # today's reading, human-readable
 python check_signal.py               # today's reading, machine-readable + trade trigger
 python report.py                     # the full v1-vs-v2 validation report
 python report_actionable.py          # the tactical-satellite-sleeve backtest report
-python ../tests/test_compute.py      # 61 unit tests
+python ../tests/test_compute.py      # 68 unit tests
 ```
 
 Nothing here needs an API key. `asi/data/cache/` holds a gzip cache of every
@@ -33,17 +34,19 @@ network; delete it to force a refetch.
 
 ## What it actually is
 
-A 0-100 score built from **six weighted dimensions**, each in turn built
+A 0-100 score built from **five weighted dimensions**, each in turn built
 from one or more raw indicators:
 
 | Dimension | Weight | Members | What it measures |
 |---|---|---|---|
-| Valuation despair | 35% | below-book-value rate, equity risk premium (ERP) | how cheap the market is |
-| Trading cooldown | 20% | volume-price temperature, 50ETF implied volatility (QVIX) | is anyone still trading, and how much fear is priced into options |
-| Price momentum | 20% | RSI(14), BIAS(60), drawdown depth (median of the three) | how far price has fallen from normal |
-| Market breadth | 10% | advancers share, new-52-week-low share, new-52-week-high share | broad-based selling vs. buying vs. structural |
-| Leverage sentiment | 10% | margin (financing) balance 5-day change, financing buy ratio | is leveraged money adding or being forcibly liquidated, and how actively |
-| Speculation extremity | 5% | limit-up share, limit-down share, longest limit-up streak | how frothy or panicked is the tape |
+| Valuation despair | 55% | below-book-value rate, equity risk premium (ERP) | how cheap the market is |
+| Trading cooldown | 22% | volume-price temperature, 50ETF implied volatility (QVIX) | is anyone still trading, and how much fear is priced into options |
+| Price momentum | 6% (inverted) | RSI(14), BIAS(60), drawdown depth (median of the three) | trend continuation, counted against the reversion signal |
+| Leverage sentiment | 11% | margin (financing) balance 5-day change, financing buy ratio | is leveraged money adding or being forcibly liquidated, and how actively |
+| Speculation extremity | 6% | limit-up share, limit-down share, longest limit-up streak | how frothy or panicked is the tape |
+
+A sixth dimension, market breadth (advancers / new-low / new-high share),
+was removed on 2026-09-17 -- see round 5 below.
 
 **2026-09 round 3:** added `iv_temp` (50ETF QVIX), `new_high_rate`, and
 `margin_buy_ratio` per a user follow-up request (dimension weights
@@ -187,6 +190,53 @@ anything to evaluate, so treat these specific numbers (28/40/52/75/46/76)
 as a reasonable, data-informed estimate carrying real overfitting risk, not
 a proven result, and revisit once more years of genuinely new data exist.
 
+**2026-09-17 round 5 (direct whole-market data, no more stock sampling):**
+the daily check used to scrape ~900 individual stocks every morning to
+reconstruct the below-book-value rate, breadth, new lows/highs and
+limit-up statistics -- the step behind every rate-limit crash of the cloud
+routine, and ~6.5 minutes of its runtime. Three changes:
+
+1. *Below-book-value rate* now comes straight from legulegu's whole-market
+   series (2005-01 onward, one request) for **both history and the live
+   reading**. The old sample reconstruction turned out to be
+   survivorship-biased before ~2014 (the sample is drawn from today's
+   listing): 2008-11 bottom 21.6% sampled vs 13.3% actual, 2012-12 11.8%
+   vs 5.1%; from 2019 on the two agree within ~1pt. Anchors unchanged (they
+   sit on the post-2019 regime; a percentile re-mapping tested no better).
+2. *Market breadth dimension removed.* None of its members has a free
+   whole-market daily source with history (new lows need a 252-day window;
+   free endpoints stop at 120 days), and with the direct below-book series
+   it wasn't earning its weight: removing it improved fwd60 and fwd120
+   Spearman IC in **each** of 2005-10, 2011-15, 2016-20 and 2021-26
+   separately. Its 10% was spread proportionally (55/22/6/11/6).
+3. *Limit-up / limit-down / streak (live)* come from East Money's
+   whole-market limit pools (~20 trading days served; history stays on the
+   sample reconstruction, which matches closely: 2026-09-01 limit-up share
+   1.59% direct vs 1.57% reconstructed, longest streak 7 vs 6). QVIX got a
+   live tail and a staleness guard, like the margin data.
+
+Measured on the same forward-return backtest (the "before" column is the
+same model code scored on the old sample inputs):
+
+| | before | after |
+|---|---|---|
+| fwd120 Spearman, 2016-09+ | -0.468 | **-0.519** |
+| fwd120 Spearman, 2021+ | -0.502 | **-0.541** |
+| fwd120 Spearman, full 2005+ | -0.381 | -0.337 |
+| Satellite sleeve, 8-day lag (2016-09+): CAGR / max DD / Calmar | 4.86% / -10.54% / 0.46 | 4.85% / **-9.43%** / **0.51** |
+| Daily check runtime | ~6.5 min (cloud) | ~40 s (local) |
+
+The full-sample IC is lower only because the old pre-2014 below-book
+readings were inflated in a way that happened to flag the 2005/2008/2012
+bottoms more loudly -- the direct series is the true figure. The sleeve's
+return is unchanged within noise (~22-29 trades over ten years); the gain is
+in drawdown and in ranking power over the period the strategy actually
+operates in. One side effect: the recalibrated scale almost never reaches
+the ice-cold zone any more (6 days in 21 years, none since 2016), so the
+zone boundaries are the obvious next thing to revisit -- not done here,
+because re-deriving them on the same window is exactly the overfitting risk
+flagged above.
+
 **Caveat stated plainly:** over this particular 10-year window the smoothed
 ASI never actually reached the two most extreme states (below 15, or above
 ~78) -- the score's own scale changed with the 2026-09 reweighting, so
@@ -199,9 +249,11 @@ specific backtest window proves works.
 
 | Source | What it provides | History |
 |---|---|---|
-| Sina `CN_MarketData.getKLineData` | Unadjusted daily bars, index & stock | back to 2001 |
-| Sina `hs_a` node | Full A-share listing + live PB | current snapshot |
-| East Money `datacenter-web` (`RPT_F10_FINANCE_MAINFINADATA`) | Per-stock annual-report book value per share | as reported |
+| Sina / Tencent / East Money daily klines | Unadjusted daily bars, index (daily check) & stock (history rebuild and sector lines only) | back to 2001 |
+| legulegu `below-net-asset-statistics-data` | Whole-market count of A-shares below book value, and listed-company count | daily, 2005-01-05+ |
+| East Money `push2ex` limit-up / limit-down pools | Whole-market limit-up and limit-down names, streak length | last ~20 trading days |
+| Sina `hs_a` node | Full A-share listing + live PB (sampling for history rebuilds / sectors) | current snapshot |
+| East Money `datacenter-web` (`RPT_F10_FINANCE_MAINFINADATA`) | Per-stock annual-report book value per share (sector lines only) | as reported |
 | akshare `stock_margin_account_info` (wraps East Money) | Nationwide margin (financing) balance, securities-lending balance, financing buy amount | 2012-09-27+ |
 | akshare `index_option_50etf_qvix` | SSE 50ETF options QVIX (China's rough VIX analogue) | 2015-02-09+ |
 | China Central Depository & Clearing 10-year yield (via akshare `bond_china_yield`) | 10-year government bond yield | 2021-09+ (see note below) |
@@ -213,10 +265,9 @@ to expect an interactive browser session). This caps the ERP indicator to a
 5-year window with percentile-based (not absolute) anchors -- documented in
 `asi/erp.py`.
 
-**Also known:** limit-up/limit-down/streak data isn't queried from East
-Money's own "limit board" endpoint, because that endpoint only serves the
-most recent ~10 trading days and can't feed a historical backtest. Instead
-`asi/limitboard.py` reconstructs it from the same unadjusted daily bars used
+**Also known:** East Money's limit-up/limit-down pools only serve the last
+~20 trading days, so they feed the live reading only; for the historical
+backtest `asi/limitboard.py` reconstructs the same statistics from the same unadjusted daily bars used
 everywhere else, using board-specific thresholds (10%/20%/5% for ST names,
 with the 2020-08-24 ChiNext/STAR registration-reform cutover). Checked
 against East Money's own measured count on 2026-08-28: 87 (reconstructed)
@@ -236,7 +287,9 @@ sentiment-index/
 │   │                        cross-sectional reconstruction (breadth, below-book-value rate)
 │   ├── erp.py, fetch_erp_data.py   Equity risk premium
 │   ├── margin.py            Margin-balance leverage indicator
-│   ├── limitboard.py        Limit-up/down + streak reconstruction
+│   ├── market_stats.py      Whole-market below-book rate and limit pools, read directly
+│   ├── iv.py                50ETF QVIX implied volatility
+│   ├── limitboard.py        Limit-up/down + streak reconstruction (history only)
 │   ├── sectors.py           Per-sector ASI (5 lines: Shanghai Composite / Shenzhen Component /
 │   │                        ChiNext / STAR 50 / CSI 2000)
 │   ├── robustness_st.py     Survivorship-bias / ST-exclusion robustness check
@@ -253,9 +306,10 @@ sentiment-index/
 │   └── data/
 │       ├── asi_history.csv          the full daily series (v1 and v2 scored side by side)
 │       ├── sector_*.csv             per-sector ASI series
-│       ├── cn10y_5y.csv, hs300_pe_5y.csv, margin_account_info.csv   raw source data
+│       ├── cn10y_5y.csv, hs300_pe_5y.csv, margin_account_info.csv,
+│       │   qvix_50etf.csv, below_book_rate.csv                          raw source data
 │       └── cache/                   gzip HTTP cache (gitignored)
-├── tests/test_compute.py    61 unit tests
+├── tests/test_compute.py    68 unit tests
 ├── sentiment_index_v1.py    the original prototype, kept ONLY so v2 can be
 │                             scored against it on identical inputs for comparison
 ├── .claude/skills/asi-signal-check/SKILL.md   packages check_signal.py as a Claude Code skill
@@ -267,6 +321,11 @@ sentiment-index/
 - ERP only has ~5 years of history with percentile (not absolute) anchors --
   a longer, reliable bond-yield source would let it graduate to the same
   kind of absolute anchor the below-book-value rate has.
+- The per-sector lines (`sectors.py`) still score from code-prefix stock
+  samples, including a sample-based below-book rate (the direct series only
+  exists for the whole market and a few large indices), and their CSVs
+  predate round 5's weights -- they need a rebuild before being compared
+  with the composite.
 - Sector breadth/valuation use code-prefix approximations for sector
   membership, not an official constituent list -- CSI 2000 in particular has
   no constituent-based dimensions at all (coverage reads honestly low there

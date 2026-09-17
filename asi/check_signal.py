@@ -98,9 +98,8 @@ def replay(smoothed):
 
 
 def main():
-    # One cached request; lets us size the window and decide whether the
-    # per-stock BPS fetch (about half of a cold run's network work) is needed
-    # at all -- it only is when a past day has to be re-scored.
+    # One cached request; sizes the re-score window to cover every day since
+    # asi_history.csv was last committed.
     idx_dates = [r[0] for r in fetch.index_daily()]
     today = idx_dates[-1]
     committed = [(r["date"], r["asi_v2"]) for r in history.load()
@@ -109,8 +108,7 @@ def main():
     missing = gap_dates(through, idx_dates[-MAX_WINDOW:], today)
     window = min(max(MIN_WINDOW, len(missing) + SMOOTH_N + 1), MAX_WINDOW)
 
-    date, vals, ip, bn, recent_panel = run_daily.today_values(
-        recent_n=window, with_bps=bool(missing))
+    date, vals, ip, _bb, recent_panel = run_daily.today_values(recent_n=window)
     try:
         res = run_daily.compute(vals)
     except InsufficientData as e:
@@ -135,8 +133,6 @@ def main():
         "triggered": triggered,
         "history_through": through,
         "recomputed_days": len(seq) - len(committed) - 1,
-        "sample_loaded": "%d/%d" % (run_daily.LAST_RUN.get("sample_loaded", 0),
-                                    run_daily.LAST_RUN.get("sample_n", 0)),
     }
 
     if triggered:

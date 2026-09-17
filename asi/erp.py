@@ -36,6 +36,8 @@ import bisect
 import csv
 import os
 
+from net import days_between, em_datacenter
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 Y10_CSV = os.path.join(HERE, "data", "cn10y_5y.csv")
 PE_CSV = os.path.join(HERE, "data", "hs300_pe_5y.csv")
@@ -60,9 +62,32 @@ def _load_csv(path, key, val):
     return out
 
 
-def _ffill(date, table, sorted_keys):
+# Forward-fill limits. PE is refreshed by hand (fetch_erp_data.py, legulegu
+# needs a cookie/CSRF session), so it gets a month and a half before ERP drops
+# out; the bond yield is extended live below, so only a short gap is filled.
+PE_MAX_STALE_DAYS = 45
+Y10_MAX_STALE_DAYS = 4
+
+
+def _ffill(date, table, sorted_keys, max_days=None):
     j = bisect.bisect_right(sorted_keys, date) - 1
-    return table[sorted_keys[j]] if j >= 0 else None
+    if j < 0:
+        return None
+    if max_days is not None and days_between(sorted_keys[j], date) > max_days:
+        return None
+    return table[sorted_keys[j]]
+
+
+def _y10_live_tail(since):
+    """China 10Y yield after `since` from East Money (EMM00166466); matches
+    the CCDC values in cn10y_5y.csv (e.g. 2026-09-01 = 1.6834)."""
+    try:
+        rows = em_datacenter("RPTA_WEB_TREASURYYIELD", "SOLAR_DATE,EMM00166466",
+                             "SOLAR_DATE", since)
+    except Exception:                                # noqa: BLE001
+        return {}
+    return {d: float(r["EMM00166466"]) for d, r in rows
+            if r.get("EMM00166466") is not None}
 
 
 def daily_series(dates):
@@ -71,14 +96,16 @@ def daily_series(dates):
     if not (os.path.exists(Y10_CSV) and os.path.exists(PE_CSV)):
         return {}
     y10 = _load_csv(Y10_CSV, "date", "y10")
+    if y10 and dates and max(dates) > max(y10):
+        y10.update(_y10_live_tail(max(y10)))
     pe = _load_csv(PE_CSV, "date", "pe_ttm")
     y10_keys, pe_keys = sorted(y10), sorted(pe)
     out = {}
     for d in dates:
         if d < START:
             continue
-        p = _ffill(d, pe, pe_keys)
-        y = y10.get(d) or _ffill(d, y10, y10_keys)
+        p = _ffill(d, pe, pe_keys, PE_MAX_STALE_DAYS)
+        y = y10.get(d) or _ffill(d, y10, y10_keys, Y10_MAX_STALE_DAYS)
         if p and y is not None and p > 0:
             out[d] = round(100.0 / p - y, 3)
     return out

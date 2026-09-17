@@ -95,16 +95,24 @@ def _eff_bps_index(bps):
     return avail, vals
 
 
-def cross_section(sample, index_dates):
+def cross_section(sample, index_dates, with_bps=True, kline_by_code=None):
     """
     Computes cross-sectional readings per day across the sampled stocks.
     Returns {date: {"breadth":%, "new_low":%, "new_high_rate":%, "broken_net_rate":%,
                      "n": stocks trading in the sample}}
-    `new_high` is the exact mirror of `new_low` (share of the sample at a
-    trailing-252-day high that day, added 2026-09 to give the breadth
-    dimension a symmetric "who's making new highs" read alongside "who's
-    making new lows" -- reuses the same rolling window already being
-    computed, so it costs nothing extra to fetch.
+    `new_high_rate` is the exact mirror of `new_low` (share of the sample at a
+    trailing-252-day high that day) -- reuses the same rolling window already
+    being computed, so it costs nothing extra to fetch.
+
+    with_bps=False skips the per-stock annual-report BPS fetch (one request per
+    sampled stock, i.e. roughly half of a cold run's total network work) and
+    returns broken_net_rate=None for every date.
+
+    kline_by_code={code: bars} reads bars already fetched by the caller instead
+    of fetching them here; a code missing from it is skipped, not re-fetched.
+    Either way a stock whose bars or BPS can't be fetched is dropped from the
+    cross-section (the >=50-stock thresholds below still apply) rather than
+    aborting the whole run.
     """
     idx_set = set(index_dates)
     up = {d: 0 for d in index_dates}
@@ -116,11 +124,23 @@ def cross_section(sample, index_dates):
     below_tot = {d: 0 for d in index_dates}
 
     for code, mkt, name, _pb in sample:
-        k = fetch.stock_daily(fetch.sina_symbol(code, mkt))
+        if kline_by_code is not None:
+            k = kline_by_code.get(code)
+        else:
+            try:
+                k = fetch.stock_daily(fetch.sina_symbol(code, mkt))
+            except Exception:                        # noqa: BLE001
+                k = None
         if not k or len(k) < 30:
             continue
-        bps = fetch.stock_bps(code, mkt)
-        avail, bvals = _eff_bps_index(bps) if bps else ([], [])
+        if with_bps:
+            try:
+                bps = fetch.stock_bps(code, mkt)
+            except Exception:                        # noqa: BLE001
+                bps = None
+            avail, bvals = _eff_bps_index(bps) if bps else ([], [])
+        else:
+            avail, bvals = [], []
 
         win = deque()                                  # rolling 252-day window
         prev = None

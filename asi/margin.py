@@ -29,6 +29,8 @@ import bisect
 import csv
 import os
 
+from net import days_between, em_datacenter
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(HERE, "data", "margin_account_info.csv")
 
@@ -64,12 +66,42 @@ def fetch_and_save():
     return len(df)
 
 
-def load_all():
+# The committed CSV only advances when someone reruns fetch_and_save() and
+# commits it. Days after its last row come straight from the same East Money
+# report akshare wraps (RPTA_WEB_MARGIN_DAILYTRADE -- identical values, e.g.
+# 2026-09-01 FIN_BALANCE = 26369.05565241), no akshare needed.
+# A value older than this many calendar days is not forward-filled.
+MAX_STALE_DAYS = 4
+
+
+def _live_tail(since):
+    try:
+        rows = em_datacenter("RPTA_WEB_MARGIN_DAILYTRADE",
+                             "STATISTICS_DATE,FIN_BALANCE,LOAN_BALANCE,FIN_BUY_AMT",
+                             "STATISTICS_DATE", since)
+    except Exception:                                # noqa: BLE001
+        return {}
+    out = {}
+    for d, r in rows:
+        if None in (r.get("FIN_BALANCE"), r.get("LOAN_BALANCE"), r.get("FIN_BUY_AMT")):
+            continue
+        out[d] = {"margin_balance": float(r["FIN_BALANCE"]),
+                  "sec_lending_balance": float(r["LOAN_BALANCE"]),
+                  "financing_buy_amount": float(r["FIN_BUY_AMT"])}
+    return out
+
+
+def load_all(live=True):
     """{date: {margin_balance, sec_lending_balance, financing_buy_amount}}
     (all in 100M CNY), chronological."""
     if not os.path.exists(CSV_PATH):
-        fetch_and_save()
+        try:
+            fetch_and_save()
+        except Exception:                            # noqa: BLE001  (akshare absent)
+            pass
     out = {}
+    if not os.path.exists(CSV_PATH):
+        return _live_tail("2012-01-01") if live else out
     with open(CSV_PATH, encoding="utf-8-sig") as f:
         for r in csv.DictReader(f):
             try:
@@ -80,12 +112,14 @@ def load_all():
                 }
             except (KeyError, ValueError):
                 continue
+    if live and out:
+        out.update(_live_tail(max(out)))
     return out
 
 
-def load_balance():
-    """{date: financing-only balance (100M CNY)} -- kept for backward compat."""
-    return {d: v["margin_balance"] for d, v in load_all().items()}
+def load_balance(live=True):
+    """{date: financing-only balance (100M CNY)}."""
+    return {d: v["margin_balance"] for d, v in load_all(live).items()}
 
 
 def _ffill_series(series_by_date, dates):
@@ -94,8 +128,14 @@ def _ffill_series(series_by_date, dates):
         return [None] * len(dates)
 
     def ffill(d):
+        # Never carry a value more than MAX_STALE_DAYS forward: once the data
+        # stops, a flat forward-fill reads as a genuine 0% change and silently
+        # biases the leverage dimension. Missing is honest -- compute()
+        # renormalizes and coverage shows it.
         j = bisect.bisect_right(keys, d) - 1
-        return series_by_date[keys[j]] if j >= 0 else None
+        if j < 0 or days_between(keys[j], d) > MAX_STALE_DAYS:
+            return None
+        return series_by_date[keys[j]]
     return [ffill(d) for d in dates]
 
 

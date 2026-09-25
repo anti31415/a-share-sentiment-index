@@ -174,7 +174,97 @@ def hyst_zone_target(score, state):
     return new_state, STATE_WEIGHT[new_state]
 
 
-def simulate_hyst(rows, sig_key="asi_v2_sm5", lag=8, cost_bp=5, cash_annual=0.02):
+# ------------------------------------------------------------------ sell side v2
+# 2026-09-24: the trim state now also fires on short-term overheating, not
+# only on the ASI's own 52-75 band. See heat.py for why: all eight tops of
+# the last ten years were overheating bursts (RSI / BIAS / volume / financing
+# buying all near 3-year highs), while the valuation-led ASI missed three of
+# them (read 27-43). Tested on 2016-09+ and 2021-09+ with an 8-day execution
+# lag, buy side unchanged:
+#
+#                                    2016-09+ CAGR/maxDD/Calmar/trades   2021-09+
+#   ASI 52-75 only (previous rule)   4.80% / -9.43% / 0.51 / 29          4.55% / -9.43% / 0.48 / 11
+#   ASI 52-75 OR heat >= 0.90        5.41% / -9.43% / 0.57 / 41          5.67% / -9.43% / 0.60 / 19
+#
+# Tops caught (a trim within -15..+25 trading days): 2 of 8 -> 5 of 8.
+# Every neighbouring setting tried (heat 0.85/0.90; hold 60/120 days; exit
+# on a 10% fall or on time) also beat the previous rule in both windows.
+# Heat alone, without the ASI band, did worse: selling on heat and buying
+# back as soon as heat cooled put the sleeve back in mid-decline.
+#
+# A heat-triggered trim is held until the index has fallen HEAT_TRIM_DROP
+# from the signal-day close or HEAT_TRIM_MAX_DAYS trading days pass -- heat
+# cools on the way down, so "exit when it cools" re-buys too early. If heat
+# is still above the threshold when the hold expires, the hold renews
+# instead of flipping to neutral and straight back. An ASI-triggered trim
+# keeps the old exit (smoothed ASI < 46 or >= 76). The buy side is unchanged.
+HEAT_TRIM_ENTER = 0.90
+HEAT_TRIM_DROP = 0.10
+HEAT_TRIM_MAX_DAYS = 120
+NEUTRAL = "Neutral (default)"
+TRIM = "Optimistic (trim)"
+
+
+def _buy_state(score):
+    if score < 15:
+        return "Ice-cold (full)"
+    if score < 28:
+        return "Pessimistic (add)"
+    return None
+
+
+class StateMachine:
+    """The full signal rule, one trading day at a time. Holds the little
+    memory a heat-triggered trim needs (when it fired, at what close)."""
+
+    def __init__(self, state=NEUTRAL):
+        self.state = state
+        self.day = 0
+        self.trim_by = None
+        self.trim_day = None
+        self.trim_close = None
+
+    def step(self, score, heat=None, close=None):
+        """Advance one day. Returns (new_state, weight, reason) -- reason is
+        "asi" or "heat" for the trigger that moved it into trim, else None."""
+        self.day += 1
+        if score is None:
+            return self.state, STATE_WEIGHT[self.state], None
+        st = self.state
+        reason = None
+        if st in ("Ice-cold (full)", "Pessimistic (add)"):
+            new = hyst_zone_target(score, st)[0]
+        elif st == TRIM:
+            new = _buy_state(score) or TRIM
+            if new == TRIM:
+                if self.trim_by == "asi":
+                    new = hyst_zone_target(score, TRIM)[0]
+                else:
+                    fell = close is not None and self.trim_close and close <= self.trim_close * (1 - HEAT_TRIM_DROP)
+                    expired = self.day - self.trim_day >= HEAT_TRIM_MAX_DAYS
+                    if fell:
+                        new = NEUTRAL
+                    elif expired:
+                        if heat is not None and heat >= HEAT_TRIM_ENTER:
+                            self.trim_day, self.trim_close = self.day, close
+                        else:
+                            new = NEUTRAL
+        else:
+            new = _buy_state(score)
+            if new is None:
+                if heat is not None and heat >= HEAT_TRIM_ENTER:
+                    new, reason = TRIM, "heat"
+                elif hyst_zone_target(score, NEUTRAL)[0] == TRIM:
+                    new, reason = TRIM, "asi"
+                else:
+                    new = NEUTRAL
+        if new == TRIM and st != TRIM:
+            self.trim_by, self.trim_day, self.trim_close = reason, self.day, close
+        self.state = new
+        return new, STATE_WEIGHT[new], reason
+
+
+def simulate_hyst(rows, sig_key="asi_v2_sm5", lag=8, cost_bp=5, cash_annual=0.02, heat_key=None):
     """
     State-machine hysteresis version -- [the satellite sleeve is accounted
     for independently], not mixed in with the core holding. This is the
@@ -185,32 +275,40 @@ def simulate_hyst(rows, sig_key="asi_v2_sm5", lag=8, cost_bp=5, cash_annual=0.02
     between cash yield and index exposure following the signal. The
     uninvested portion earns interest at cash_annual (default 2%, an
     approximation of money-market/short-bond yields).
+
+    heat_key=None replays the ASI-only rule (hyst_zone_target); pass the
+    rows' heat column to replay the full rule (StateMachine).
     """
     n = len(rows)
     c = [r["close"] for r in rows]
     cash_daily = (1 + cash_annual) ** (1 / 243) - 1
-    state = "Neutral (default)"
+    sm = StateMachine()
+    state = NEUTRAL
     w = 0.50
     pending = []
     nav = [1.0]
     trades = []
     for i in range(1, n):
         sig = rows[i - 1].get(sig_key)
-        if sig is not None and not pending:
+        if heat_key is not None:
+            new_state, new_w, _r = sm.step(sig, rows[i - 1].get(heat_key), c[i - 1])
+        elif sig is not None:
             new_state, new_w = hyst_zone_target(sig, state)
-            if new_state != state:
-                pending.append((i - 1 + lag, new_w))
-                state = new_state
-        cur_ret = c[i] / c[i - 1] - 1
+        else:
+            new_state, new_w = state, STATE_WEIGHT[state]
+        if new_state != state:
+            pending.append((i - 1 + lag, new_w))
+            state = new_state
         executed_today = False
+        cost = 0.0
         for exec_i, tgt in list(pending):
             if exec_i == i:
-                cost = abs(tgt - w) * (cost_bp / 10000.0)
+                cost += abs(tgt - w) * (cost_bp / 10000.0)
                 w = tgt
                 executed_today = True
                 trades.append({"date": rows[i]["date"], "price": c[i], "target": tgt, "state": state})
                 pending.remove((exec_i, tgt))
-        step = w * cur_ret + (1 - w) * cash_daily
+        step = w * (c[i] / c[i - 1] - 1) + (1 - w) * cash_daily
         if executed_today:
             step -= cost
         nav.append(nav[-1] * (1 + step))

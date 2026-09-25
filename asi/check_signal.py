@@ -56,6 +56,7 @@ sys.path.insert(0, HERE)
 import actionable as A          # noqa: E402
 import fetch                    # noqa: E402
 import guidance as G            # noqa: E402
+import heat as heat_mod         # noqa: E402
 import history                  # noqa: E402
 import run_daily                # noqa: E402
 from compute import compute, InsufficientData  # noqa: E402
@@ -98,15 +99,17 @@ def trailing_mean(vals, n=SMOOTH_N):
     return out
 
 
-def replay(smoothed):
-    """Runs the state machine over the whole smoothed series.
-    Returns (state entering today, state after today, target weight)."""
-    state = INITIAL_STATE
-    for s in smoothed[:-1]:
-        state, _ = A.hyst_zone_target(s, state)
-    prior = state
-    new_state, weight = A.hyst_zone_target(smoothed[-1], state)
-    return prior, new_state, weight
+def replay(smoothed, heats, closes):
+    """Runs the full rule (actionable.StateMachine: ASI hysteresis plus the
+    overheating trim) over the whole series, one day at a time.
+    Returns (state entering today, state after today, target weight,
+    trigger reason for today's move into trim or None)."""
+    machine = A.StateMachine(INITIAL_STATE)
+    for s, h, c in zip(smoothed[:-1], heats[:-1], closes[:-1]):
+        machine.step(s, h, c)
+    prior = machine.state
+    new_state, weight, reason = machine.step(smoothed[-1], heats[-1], closes[-1])
+    return prior, new_state, weight, reason
 
 
 def parse_args(argv=None):
@@ -121,7 +124,8 @@ def main(argv=None):
     args = parse_args(argv)
     # One cached request; sizes the re-score window to cover every day since
     # asi_history.csv was last committed.
-    idx_dates = [r[0] for r in fetch.index_daily()]
+    idx = fetch.index_daily()
+    idx_dates = [r[0] for r in idx]
     today = idx_dates[-1]
     hist_rows = history.load()
     committed = [(r["date"], r["asi_v2"]) for r in hist_rows
@@ -140,8 +144,14 @@ def main(argv=None):
 
     seq = asi_series(date, res["score"], recent_panel, committed)
     smoothed = trailing_mean([s for _d, s in seq])
-    prior_state, new_state, new_weight = replay(smoothed)
+    close_by_date = {r["date"]: r["close"] for r in hist_rows}
+    close_by_date.update({r["date"]: r["close"] for r in recent_panel})
+    close_by_date[date] = ip["close"]
+    heat_by_date = heat_mod.series_by_date(idx)
+    prior_state, new_state, new_weight, reason = replay(
+        smoothed, [heat_by_date.get(d) for d, _s in seq], [close_by_date.get(d) for d, _s in seq])
     triggered = new_state != prior_state
+    heat_today = heat_by_date.get(date)
 
     out = {
         "date": date,
@@ -153,13 +163,13 @@ def main(argv=None):
         "new_state": new_state,
         "satellite_target_weight": new_weight,
         "triggered": triggered,
+        "trigger_reason": reason,
+        "heat": round(heat_today, 3) if heat_today is not None else None,
+        "heat_trim_threshold": A.HEAT_TRIM_ENTER,
         "history_through": through,
         "recomputed_days": len(seq) - len(committed) - 1,
     }
 
-    close_by_date = {r["date"]: r["close"] for r in hist_rows}
-    close_by_date.update({r["date"]: r["close"] for r in recent_panel})
-    close_by_date[date] = ip["close"]
     g_series = [(d, close_by_date[d], sm) for (d, _s), sm in zip(seq, smoothed)
                 if close_by_date.get(d) is not None]
     side = G.side_of(smoothed[-1], g_series)
@@ -175,14 +185,17 @@ def main(argv=None):
         out["alert"] = (
             "ASI ACTION SIGNAL — %s\n"
             "5-day smoothed ASI = %.1f (raw today = %.1f, coverage %.0f%%)\n"
-            "State change: %s -> %s\n"
+            "State change: %s -> %s%s\n"
             "Action: place an order today to move your tactical satellite "
             "sleeve to %.0f%% invested (the rest stays in cash/money-market).\n"
             "Remember this is a FIRST-CROSSING trigger — do not repeat the "
             "order if the signal stays in this zone tomorrow; wait for the "
             "next state change."
         ) % (date, smoothed[-1], res["score"], res["coverage"] * 100,
-             prior_state, new_state, new_weight * 100)
+             prior_state, new_state,
+             {"heat": " (trigger: short-term overheating, heat %.0f%%)" % ((heat_today or 0) * 100),
+              "asi": " (trigger: smoothed ASI in the 52-75 band)"}.get(reason, ""),
+             new_weight * 100)
         print(out["alert"], file=sys.stderr)
 
     print(json.dumps(out, ensure_ascii=False))

@@ -54,13 +54,14 @@ always prints one JSON line to stdout, e.g.:
 | Ice-cold (full) | 100% | ASI 5-day-smoothed < 15 (exit at >= 25) — rare, deepest panic tier |
 | Pessimistic (add) | 75% | ASI 5-day-smoothed < 28 (exit at >= 40) — add to the reserve |
 | Neutral (default) | 50% | No signal — baseline allocation, do nothing |
-| Optimistic (trim) | 20% | ASI 5-day-smoothed in [52, 75) (exit below 46 or at >= 76) — trim the reserve |
+| Optimistic (trim) | 20% | ASI 5-day-smoothed in [52, 75) (exit below 46 or at >= 76), **or** short-term overheating `heat` >= 0.90 (exit after a 10% fall or 120 trading days) — trim the reserve |
 
 - **`triggered: true`** → tell the user explicitly: "Place an order today
   to move the tactical sleeve to `satellite_target_weight * 100`% invested."
   Emphasize this is a first-crossing trigger — remind them not to repeat
   the order every day the reading stays in the same zone; the next order
   only comes on the *next* state change.
+- **`trigger_reason`** → on a move into trim, `"asi"` (valuation-led band) or `"heat"` (RSI / BIAS / volume / financing buying all near 3-year highs — see `asi/heat.py`); say which one.
 - **`triggered: false`** → nothing to report by default. Only mention it if
   the user explicitly asked for a status check (then say "no signal today,
   currently in `new_state`").

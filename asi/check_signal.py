@@ -159,6 +159,7 @@ def main(argv=None):
         "asi_today": res["score"],
         "asi_smoothed_5d": round(smoothed[-1], 2),
         "coverage": res["coverage"],
+        "missing_inputs": [k for k in history.V2_KEYS if vals.get(k) is None],
         "prior_state": prior_state,
         "new_state": new_state,
         "satellite_target_weight": new_weight,

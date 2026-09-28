@@ -59,10 +59,14 @@ full = {"broken_net_rate": 8.0, "vol_temp": 50.0, "rsi14": 50.0,
 r_full = compute(full)
 ok(near(r_full["coverage"], 1.0), "full inputs -> coverage = 1.0")
 part = dict(full)
-for k in ("breadth", "new_low"):
+for k in ("limit_up_rate", "limit_down_rate", "max_consec_limit"):
     part.pop(k)
 r_part = compute(part)
-ok(near(r_part["coverage"], 0.90), "missing breadth dimension (weight 10%) -> coverage = 0.90")
+ok(near(r_part["coverage"], 0.94), "missing speculation dimension (weight 6%) -> coverage = 0.94")
+ok("breadth" not in [d["key"] for d in DIMENSIONS],
+   "market-breadth dimension is not scored (removed 2026-09-17, see indicators.py)")
+noisy = dict(full, breadth=5.0, new_low=40.0, new_high_rate=0.0)
+ok(near(compute(noisy)["score"], r_full["score"]), "breadth inputs no longer move the score")
 ok(abs(r_part["score"] - r_full["score"]) < 6,
    "losing one dimension only shifts the score a little (%.1f -> %.1f), doesn't collapse to 0"
    % (r_full["score"], r_part["score"]))
@@ -92,8 +96,23 @@ print("\nPrice momentum three-in-one (review 3.1)")
 v = {"broken_net_rate": 8.0, "rsi14": 20.0, "bias60": -20.0, "drawdown": -60.0}
 r = compute(v)
 mom = [d for d in r["dims"] if d["key"] == "momentum"][0]
-ok(mom["weight"] == 20, "price-momentum dimension weight is 20% (v1's three parts summed to 40%)")
+ok(mom["weight"] == 6, "price-momentum dimension weight is 6% (v1's three parts summed to 40%; "
+   "cut 20->5 in 2026-09's IC diagnostic pass, 6 after the breadth removal; see indicators.py)")
 ok(mom["score"] < 10, "dimension score is low when all three are extreme: %.1f" % mom["score"])
+ok(mom["contrib"] > 0, "momentum's own reading is deeply bearish (score %.1f) but "
+   "invert_in_composite means its CONTRIBUTION to the total is still positive "
+   "(contrib %.1f) -- measured IC says stretched-down momentum doesn't fade" % (mom["score"], mom["contrib"]))
+
+print("\nmomentum dimension's invert_in_composite actually flips the total, not just the label")
+base = {"broken_net_rate": 8.0}
+bearish_mom = compute(dict(base, rsi14=20.0, bias60=-20.0, drawdown=-60.0), require_valuation=False)
+bullish_mom = compute(dict(base, rsi14=90.0, bias60=25.0, drawdown=-2.0), require_valuation=False)
+ok(bearish_mom["score"] > bullish_mom["score"],
+   "with everything else equal, a deeply bearish momentum reading (%.1f) should "
+   "score HIGHER overall than a euphoric one (%.1f), because the flipped "
+   "contribution treats 'stretched down' as a mild continuation-down signal, "
+   "not a bounce signal"
+   % (bearish_mom["score"], bullish_mom["score"]))
 
 print("\nZones return an index, not a reverse lookup by Chinese label")
 i, name, tag, _ = zone_of(7.0)
@@ -131,8 +150,8 @@ ok("leverage" in [d["key"] for d in DIMENSIONS], "leverage-sentiment dimension i
 ok("speculation" in [d["key"] for d in DIMENSIONS], "speculation-extremity dimension is registered")
 lev = [d for d in DIMENSIONS if d["key"] == "leverage"][0]
 spec = [d for d in DIMENSIONS if d["key"] == "speculation"][0]
-ok(lev["weight"] == 10, "leverage-sentiment weight is 10%")
-ok(spec["weight"] == 5, "speculation-extremity weight is 5% (deliberately low -- small, volatile sample)")
+ok(lev["weight"] == 11, "leverage-sentiment weight is 11%")
+ok(spec["weight"] == 6, "speculation-extremity weight is 6% (deliberately low -- small, volatile sample)")
 r_crash = compute({"broken_net_rate": 8.0, "margin_chg5": -29.0})
 r_calm = compute({"broken_net_rate": 8.0, "margin_chg5": 0.0})
 ok(r_crash["score"] < r_calm["score"],
@@ -158,15 +177,20 @@ ns2, w2 = ACT.hyst_zone_target(20.0, ns)
 ok(ns2 == "Ice-cold (full)" and w2 == 1.00, "20 hasn't reached the exit threshold (25) -- stays ice-cold/full")
 ns3, w3 = ACT.hyst_zone_target(26.0, ns2)
 ok(ns3 == "Neutral (default)" and w3 == 0.50, "26 triggers the exit, back to neutral")
-ns4, w4 = ACT.hyst_zone_target(70.0, "Neutral (default)")
-ok(ns4 == "Optimistic (trim)" and w4 == 0.20, "a score of 70 from neutral triggers optimistic/trim")
-ns5, w5 = ACT.hyst_zone_target(60.0, ns4)
-ok(ns5 == "Optimistic (trim)" and w5 == 0.20, "60 hasn't reached the exit threshold (<55) -- stays optimistic/trim")
-ns6, w6 = ACT.hyst_zone_target(50.0, ns5)
-ok(ns6 == "Neutral (default)" and w6 == 0.50, "50 triggers the exit, back to neutral")
-ns7, w7 = ACT.hyst_zone_target(82.0, "Optimistic (trim)")
+# Thresholds revised 2026-09 (52<=s<75 enter, s<46 or s>=76 exit) -- see
+# actionable.py's HYST_STATES note: a local return-curve scan on this
+# strategy's own 2016-09+ window, run after the momentum-dimension
+# reweighting changed the score's scale, found the actual worst pocket
+# sits around 52-59, not the original 65-80.
+ns4, w4 = ACT.hyst_zone_target(60.0, "Neutral (default)")
+ok(ns4 == "Optimistic (trim)" and w4 == 0.20, "a score of 60 from neutral triggers optimistic/trim")
+ns5, w5 = ACT.hyst_zone_target(55.0, ns4)
+ok(ns5 == "Optimistic (trim)" and w5 == 0.20, "55 hasn't reached the exit threshold (<46) -- stays optimistic/trim")
+ns6, w6 = ACT.hyst_zone_target(45.0, ns5)
+ok(ns6 == "Neutral (default)" and w6 == 0.50, "45 triggers the exit, back to neutral")
+ns7, w7 = ACT.hyst_zone_target(78.0, "Optimistic (trim)")
 ok(ns7 == "Neutral (default)" and w7 == 0.50,
-   "spiking to 82 also exits optimistic/trim (back to neutral, not further trimming)")
+   "spiking to 78 also exits optimistic/trim (back to neutral, not further trimming)")
 
 print("=" * 46)
 print("%d passed, %d failed" % (TOTAL[0] - len(FAIL), len(FAIL)))

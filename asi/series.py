@@ -97,16 +97,16 @@ def _eff_bps_index(bps):
 
 def cross_section(sample, index_dates, with_bps=True, kline_by_code=None):
     """
-    Computes three cross-sectional readings per day across the sampled stocks.
-    Returns {date: {"breadth":%, "new_low":%, "broken_net_rate":%, "n": stocks trading in the sample}}
+    Computes cross-sectional readings per day across the sampled stocks.
+    Returns {date: {"breadth":%, "new_low":%, "new_high_rate":%, "broken_net_rate":%,
+                     "n": stocks trading in the sample}}
+    `new_high_rate` is the exact mirror of `new_low` (share of the sample at a
+    trailing-252-day high that day) -- reuses the same rolling window already
+    being computed, so it costs nothing extra to fetch.
 
     with_bps=False skips the per-stock annual-report BPS fetch (one request per
     sampled stock, i.e. roughly half of a cold run's total network work) and
-    returns broken_net_rate=None for every date. Callers that read the
-    below-book-value rate from the full-market listing instead of from the
-    sample -- run_daily.today_values() does -- never look at that key, so
-    fetching it is pure cost for them. build_panel(), which writes the
-    historical below-book-value column into asi_history.csv, still needs it.
+    returns broken_net_rate=None for every date.
 
     kline_by_code={code: bars} reads bars already fetched by the caller instead
     of fetching them here; a code missing from it is skipped, not re-fetched.
@@ -119,6 +119,7 @@ def cross_section(sample, index_dates, with_bps=True, kline_by_code=None):
     tot = {d: 0 for d in index_dates}
     nlow = {d: 0 for d in index_dates}
     nlow_tot = {d: 0 for d in index_dates}
+    nhigh = {d: 0 for d in index_dates}
     below = {d: 0 for d in index_dates}
     below_tot = {d: 0 for d in index_dates}
 
@@ -141,10 +142,10 @@ def cross_section(sample, index_dates, with_bps=True, kline_by_code=None):
         else:
             avail, bvals = [], []
 
-        win = deque()                                  # rolling 252-day low
+        win = deque()                                  # rolling 252-day window
         prev = None
         for d, close, _v in k:
-            # rolling window (simplified monotonic-queue: fixed-length deque + min)
+            # rolling window (simplified monotonic-queue: fixed-length deque + min/max)
             win.append(close)
             if len(win) > 252:
                 win.popleft()
@@ -157,6 +158,8 @@ def cross_section(sample, index_dates, with_bps=True, kline_by_code=None):
                     nlow_tot[d] += 1
                     if close <= min(win) + 1e-9:
                         nlow[d] += 1
+                    if close >= max(win) - 1e-9:
+                        nhigh[d] += 1
                 if avail:
                     j = bisect.bisect_right(avail, d) - 1
                     if j >= 0 and bvals[j] > 0:
@@ -170,6 +173,7 @@ def cross_section(sample, index_dates, with_bps=True, kline_by_code=None):
         out[d] = {
             "breadth_raw": (up[d] / tot[d] * 100.0) if tot[d] >= 50 else None,
             "new_low": (nlow[d] / nlow_tot[d] * 100.0) if nlow_tot[d] >= 50 else None,
+            "new_high_rate": (nhigh[d] / nlow_tot[d] * 100.0) if nlow_tot[d] >= 50 else None,
             "broken_net_rate": (below[d] / below_tot[d] * 100.0) if below_tot[d] >= 50 else None,
             "n": tot[d],
         }
@@ -209,6 +213,7 @@ def build_panel(n_sample=900, start="2005-01-01", index_sym="sh000001",
         d = rec["date"]
         rec["breadth"] = br[i]
         rec["new_low"] = cs[d]["new_low"]
+        rec["new_high_rate"] = cs[d]["new_high_rate"]
         rec["broken_net_rate"] = cs[d]["broken_net_rate"]
         rec["n_sample"] = cs[d]["n"]
     return [r for r in ip if r["date"] >= start]
